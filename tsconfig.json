@@ -1,0 +1,13 @@
+{
+	"compilerOptions": {
+		"target": "es5",
+		"noImplicitReturns": true,
+		"noEmitOnError": true,
+		"outDir": "js/",
+		"sourceMap": true,
+		"skipLibCheck": true
+	},
+	"include": [
+		"src/**/*"
+	]
+}

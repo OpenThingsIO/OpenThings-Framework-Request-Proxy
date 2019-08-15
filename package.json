@@ -1,0 +1,26 @@
+{
+	"name": "openthings-framework-server",
+	"version": "0.0.0",
+	"author": "Matthew Oslan",
+	"license": "MIT",
+	"description": "OpenThings request forwarding server",
+	"scripts": {
+		"compile": "tsc",
+		"start": "node js/server.js",
+		"test": "echo \"Error: no test specified\" && exit 1"
+	},
+	"dependencies": {
+		"dotenv": "^8.0.0",
+		"express": "^4.17.1",
+		"mysql": "^2.17.1",
+		"ws": "^7.1.1"
+	},
+	"devDependencies": {
+		"@types/dotenv": "^6.1.1",
+		"@types/express": "^4.17.0",
+		"@types/mysql": "^2.15.6",
+		"@types/node": "^10.14.13",
+		"@types/ws": "^6.0.1",
+		"typescript": "^3.5.3"
+	}
+}
