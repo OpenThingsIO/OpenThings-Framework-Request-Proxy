@@ -62,7 +62,7 @@ server.on( "connection", async ( ws: WebSocket, req: http.IncomingMessage ) => {
 			return;
 		}
 
-		const match = message.match( /^RES: ([0-9a-f]{4})\n([\s\S]*)$/ );
+		const match = message.match( /^RES: ([0-9a-f]{4})\r\n([\s\S]*)$/ );
 		// Ignore messages that aren't formatted like responses to forwarded requests.
 		if ( !match ) {
 			console.info( "Received message with invalid format:", message );
