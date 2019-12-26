@@ -141,7 +141,7 @@ const validateKey = async ( deviceKey: string ): Promise<boolean> => {
 			resolve( false );
 		}
 
-		connection.query( "SELECT * FROM ? WHERE device_key = ?", [ process.env.MYSQL_TABLE, deviceKey ], ( err, results, fields ) => {
+		connection.query( "SELECT * FROM ?? WHERE device_key = ?", [ process.env.MYSQL_TABLE, deviceKey ], ( err, results, fields ) => {
 			if ( err ) {
 				console.error( err );
 				resolve( false );
