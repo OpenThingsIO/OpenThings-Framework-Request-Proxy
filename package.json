@@ -1,5 +1,5 @@
 {
-	"name": "openthings-framework-server",
+	"name": "otf-request-proxy",
 	"version": "0.0.0",
 	"author": "Matthew Oslan",
 	"license": "MIT",
