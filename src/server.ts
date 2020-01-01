@@ -5,8 +5,8 @@ import { config as dotenv_config } from "dotenv"
 
 dotenv_config();
 
-const host = process.env.HOST || "0.0.0.0";
-const port = parseInt( process.env.HTTP_PORT ) || 8080;
+const host = process.env.HOST || "127.0.0.1";
+const port = parseInt( process.env.HTTP_PORT ) || 3000;
 
 const app = express();
 

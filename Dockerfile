@@ -1,7 +1,6 @@
 FROM node:10
 
-# FIXME set ports
-EXPOSE 8888
+EXPOSE 3000
 EXPOSE 8080
 
 ENTRYPOINT npm run start

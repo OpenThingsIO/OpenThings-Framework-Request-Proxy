@@ -7,7 +7,8 @@ import { AuthenticationPlugin } from "../AuthenticationPlugin";
 import * as fs from "fs";
 
 const server = new WebSocket.Server( {
-	port: 8888
+	host: process.env.HOST,
+	port: parseInt( process.env.WEBSOCKET_PORT ) || 8080
 } );
 const connectedControllers: Map<String, WebSocket> = new Map();
 const pendingResponses: Map<String, express.Response> = new Map();
