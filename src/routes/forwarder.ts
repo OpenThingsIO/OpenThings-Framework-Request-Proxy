@@ -105,16 +105,19 @@ async function setup() {
 		ws.on( "pong", () => {
 			ws[ "isAlive" ] = true;
 		} );
-		setInterval( () => {
-			// Close the connection if a pong was not received since the last check.
-			if ( !ws[ "isAlive" ] ) {
-				ws.terminate();
-				return;
-			}
+		(function() {
+			const intervalId = setInterval( () => {
+				// Close the connection if a pong was not received since the last check.
+				if ( !ws[ "isAlive" ] ) {
+					ws.terminate();
+					clearInterval(intervalId);
+					return;
+				}
 
-			ws[ "isAlive" ] = false;
-			ws.ping();
-		}, 10 * 1000 );
+				ws[ "isAlive" ] = false;
+				ws.ping();
+			}, 10 * 1000 );
+		})();
 
 		console.log( `A client connected with device key '${ deviceKey }'.` );
 	} );
