@@ -2,7 +2,7 @@
 	"name": "otf-request-proxy",
 	"version": "0.0.0",
 	"author": "Matthew Oslan",
-	"license": "MIT",
+	"license": "GPL-3.0",
 	"description": "OpenThings request forwarding server",
 	"scripts": {
 		"compile": "tsc",
