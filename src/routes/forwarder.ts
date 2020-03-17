@@ -6,10 +6,7 @@ import * as URL from "url";
 import { AuthenticationPlugin } from "../AuthenticationPlugin";
 import * as fs from "fs";
 
-const server = new WebSocket.Server( {
-	host: process.env.HOST,
-	port: parseInt( process.env.WEBSOCKET_PORT ) || 8080
-} );
+let server: WebSocket.Server;
 const connectedControllers: Map<String, WebSocket> = new Map();
 const pendingResponses: Map<String, express.Response> = new Map();
 
@@ -29,6 +26,11 @@ async function setup() {
 		console.error( "Fatal error initializing authentication plugin", err );
 		process.exit( 1 );
 	}
+
+	server = new WebSocket.Server( {
+		host: process.env.HOST,
+		port: parseInt( process.env.WEBSOCKET_PORT ) || 8080
+	} );
 
 	server.on( "connection", async ( ws: WebSocket, req: http.IncomingMessage ) => {
 		const url = URL.parse( req.url );
