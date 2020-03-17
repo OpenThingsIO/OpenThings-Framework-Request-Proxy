@@ -6,7 +6,7 @@ import * as mysql from "mysql";
  */
 export default class MySQLAuthenticationPlugin extends AuthenticationPlugin {
 
-	private connection: mysql.Connection;
+	private pool: mysql.Pool;
 
 	public async init(): Promise<void> {
 		return new Promise( ( resolve, reject ) => {
@@ -18,26 +18,14 @@ export default class MySQLAuthenticationPlugin extends AuthenticationPlugin {
 				}
 			}
 
-			this.connection = mysql.createConnection( process.env.MYSQL_CONNECTION_URL );
-			this.connection.connect( ( err ) => {
-				if ( err ) {
-					reject( "Error connecting to database: " + err );
-				} else {
-					console.log( "Connected to database" );
-					resolve();
-				}
-			} );
+			this.pool = mysql.createPool( process.env.MYSQL_CONNECTION_URL );
+			resolve();
 		} );
 	}
 
 	public validateKey( deviceKey: string ): Promise<boolean> {
 		return new Promise<boolean>( ( resolve, reject ) => {
-			// Reject all keys if the database connection isn't ready yet.
-			if ( this.connection.state !== "authenticated" ) {
-				resolve( false );
-			}
-
-			this.connection.query( "SELECT * FROM ?? WHERE device_key = ?", [ process.env.MYSQL_TABLE, deviceKey ], ( err, results, fields ) => {
+			this.pool.query( "SELECT * FROM ?? WHERE device_key = ?", [ process.env.MYSQL_TABLE, deviceKey ], ( err, results, fields ) => {
 				if ( err ) {
 					console.error( err );
 					resolve( false );
