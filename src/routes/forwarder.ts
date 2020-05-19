@@ -139,7 +139,7 @@ export const forwardRequest = ( req: express.Request, res: express.Response ) =>
 
 	const ws: WebSocket = connectedControllers.get( deviceKey );
 
-	const path = req.url.substring( ( "/forward/v1/" + deviceKey ).length );
+	const path = req.url.substring( ( "/forward/v1/" + deviceKey ).length ) || "/";
 
 	let rawRequest: string = `${ req.method } ${ path } HTTP/${ req.httpVersion }\r\n`;
 	for ( const header in req.headers ) {

@@ -13,7 +13,7 @@ const app = express();
 
 app.use(cors());
 app.use( bodyParser.text( { type: "*/*", limit: "1mb" } ) );
-app.all( "/forward/v1/:deviceKey/*", forwarder.forwardRequest );
+app.all( "/forward/v1/:deviceKey*?", forwarder.forwardRequest );
 
 app.listen( port, host, () => {
 	console.log( "%s v%s now listening on %s:%d", process.env.npm_package_description, process.env.npm_package_version, host, port );
