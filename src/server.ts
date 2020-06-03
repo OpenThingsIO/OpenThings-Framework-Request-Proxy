@@ -13,6 +13,10 @@ const app = express();
 
 app.use( cors() );
 app.use( bodyParser.text( { type: "*/*", limit: "1mb" } ) );
+// Add a trailing slash
+app.all( "/forward/v1/:deviceKey$", ( req, res, next ) => {
+	res.redirect( 301, req.url + "/" );
+} );
 app.all( "/forward/v1/:deviceKey*?", forwarder.forwardRequest );
 
 app.listen( port, host, () => {
