@@ -1,4 +1,4 @@
-# OTF Request Proxy
+# OpenThings Framework - Request Proxy
  
 This service forwards HTTP requests to IoT devices running the [OTF firmware library](https://github.com/openthingsio/OTF-Firmware-Library), enabling them to be accessed over the internet.
 The service opens a websocket server that devices can connect to, and a webserver that handles HTTP requests.
