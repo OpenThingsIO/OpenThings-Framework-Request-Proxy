@@ -1,4 +1,4 @@
-import express from "express";
+import { Request, Response } from "express";
 import WebSocket, { Server as WebSocketServer } from 'ws';
 import { IncomingMessage } from "http";
 import { URL } from "url";
@@ -7,7 +7,7 @@ import { default as fs } from "fs";
 
 let server: WebSocketServer;
 const connectedControllers: Map<String, WebSocket> = new Map();
-const pendingResponses: Map<String, express.Response> = new Map();
+const pendingResponses: Map<String, Response> = new Map();
 
 async function setup() {
 	// Load the specified authentication plugin.
@@ -32,14 +32,14 @@ async function setup() {
 	} );
 
 	server.on( "connection", async ( ws: WebSocket, req: IncomingMessage ) => {
-		const url = new URL( req.url );
+		const url = new URL( req.url, "ws://localhost" );
 		if ( url.pathname !== "/socket/v1" ) {
 			ws.send( "ERR: invalid path." );
 			ws.terminate();
 			return;
 		}
 
-		const deviceKey = url.searchParams[ "deviceKey" ];
+		const deviceKey = url.searchParams.get("deviceKey");
 		if ( !deviceKey || typeof deviceKey !== "string" ) {
 			ws.send( "ERR: deviceKey was not properly specified." );
 			ws.terminate();
@@ -103,7 +103,6 @@ async function setup() {
 		} );
 
 		ws.on('message', ( data: WebSocket.Data, isBinary: boolean ) => {
-			console.log( `Received message from client with device key '${ deviceKey }` );
 			// Ignore binary messages.
 			if ( isBinary ) {
 				console.info( `Ignoring binary message from client with device key '${ deviceKey }'.` );
@@ -147,18 +146,18 @@ async function setup() {
 				return;
 			}
 
-			const res: express.Response = pendingResponses.get( requestKey );
+			const res: Response = pendingResponses.get( requestKey );
 			pendingResponses.delete( requestKey );
 
-			res.connection.write( body );
-			res.connection.end();
+			res.socket.write( body );
+			res.socket.end();
 		} );
 
 		console.log( `A client connected with device key '${ deviceKey }'.` );
 	} );
 }
 
-export const forwardRequest = ( req: express.Request, res: express.Response ) => {
+export const forwardRequest = ( req: Request, res: Response ) => {
 	const deviceKey = req.params.deviceKey;
 	if ( !deviceKey || typeof deviceKey !== "string" ) {
 		res.status( 401 ).json( { message: "No device key was specified or an invalid format was used." } );
@@ -166,7 +165,6 @@ export const forwardRequest = ( req: express.Request, res: express.Response ) =>
 	}
 
 	if ( !connectedControllers.has( deviceKey ) ) {
-		console.log(connectedControllers.keys());
 		res.status( 404 ).json( { message: "Specified device does not exist or is not connected." } );
 		return;
 	}
