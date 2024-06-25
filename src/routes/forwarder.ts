@@ -1,12 +1,11 @@
-import * as express from "express";
-import * as WebSocket from "ws";
-import * as http from "http";
-import * as querystring from "querystring";
-import * as URL from "url";
+import express from "express";
+import WebSocket, { Server as WebSocketServer } from 'ws';
+import { IncomingMessage } from "http";
+import { URL } from "url";
 import { AuthenticationPlugin } from "../AuthenticationPlugin";
-import * as fs from "fs";
+import { default as fs } from "fs";
 
-let server: WebSocket.Server;
+let server: WebSocketServer;
 const connectedControllers: Map<String, WebSocket> = new Map();
 const pendingResponses: Map<String, express.Response> = new Map();
 
@@ -27,20 +26,20 @@ async function setup() {
 		process.exit( 1 );
 	}
 
-	server = new WebSocket.Server( {
+	server = new WebSocketServer( {
 		host: process.env.HOST,
 		port: parseInt( process.env.WEBSOCKET_PORT ) || 8080
 	} );
 
-	server.on( "connection", async ( ws: WebSocket, req: http.IncomingMessage ) => {
-		const url = URL.parse( req.url );
+	server.on( "connection", async ( ws: WebSocket, req: IncomingMessage ) => {
+		const url = new URL( req.url );
 		if ( url.pathname !== "/socket/v1" ) {
 			ws.send( "ERR: invalid path." );
 			ws.terminate();
 			return;
 		}
 
-		const deviceKey = querystring.parse( url.query )[ "deviceKey" ];
+		const deviceKey = url.searchParams[ "deviceKey" ];
 		if ( !deviceKey || typeof deviceKey !== "string" ) {
 			ws.send( "ERR: deviceKey was not properly specified." );
 			ws.terminate();
@@ -69,18 +68,71 @@ async function setup() {
 		}
 
 		connectedControllers.set( deviceKey, ws );
-		ws.on( "close", () => {
-			connectedControllers.delete( deviceKey );
+
+		// Close connections that don't respond to pings within 10 seconds.
+		ws[ "isAlive" ] = true;
+		ws.on( "pong", () => {
+			ws[ "isAlive" ] = true;
 		} );
 
-		ws.on( "message", ( message ) => {
-			// Ignore binary messages.
-			if ( typeof message !== "string" ) {
-				console.info( "Ignoring binary message" );
+		const intervalId = setInterval( () => {
+			// Close the connection if a pong was not received since the last check.
+			if ( !ws[ "isAlive" ] ) {
+				console.log( `A client with device key '${ deviceKey }' did not respond to pings.` );
+				connectedControllers.delete( deviceKey );
+				ws.terminate();
+				clearInterval(intervalId);
 				return;
 			}
 
-			const match = message.match( /^RES: ([0-9a-f]{4})\r\n([\s\S]*)$/ );
+			ws[ "isAlive" ] = false;
+			ws.ping();
+		}, 10 * 1000 );
+
+
+		ws.on('error', (err) => {
+			console.error( `A client with device key '${ deviceKey }' errored:`, err );
+			connectedControllers.delete( deviceKey );
+			clearInterval( intervalId );
+		});
+
+		ws.on('close', (code, reason) => {
+			console.log( `A client with device key '${ deviceKey }' disconnected.` );
+			connectedControllers.delete( deviceKey );
+			clearInterval( intervalId );
+		} );
+
+		ws.on('message', ( data: WebSocket.Data, isBinary: boolean ) => {
+			console.log( `Received message from client with device key '${ deviceKey }` );
+			// Ignore binary messages.
+			if ( isBinary ) {
+				console.info( `Ignoring binary message from client with device key '${ deviceKey }'.` );
+				return;
+			}
+
+			let message: string;
+			switch ( typeof data ) {
+				case "string":
+					message = data;
+					break;
+				case "object":
+					if ( data instanceof Buffer ) {
+						message = data.toString();
+						break;
+					} else if ( data instanceof ArrayBuffer ) {
+						message = Buffer.from( data ).toString();
+						break;
+					} else if ( data instanceof Array ) {
+						// Array of buffers
+						message = Buffer.concat( data ).toString();
+					}
+					break;
+				default:
+					console.info( "Received message with invalid type:", message );
+					return;
+			}
+
+			const match = (message as string).match( /^RES: ([0-9a-f]{4})\r\n([\s\S]*)$/ );
 			// Ignore messages that aren't formatted like responses to forwarded requests.
 			if ( !match ) {
 				console.info( "Received message with invalid format:", message );
@@ -102,25 +154,6 @@ async function setup() {
 			res.connection.end();
 		} );
 
-		// Close connections that don't respond to pings within 10 seconds.
-		ws[ "isAlive" ] = true;
-		ws.on( "pong", () => {
-			ws[ "isAlive" ] = true;
-		} );
-		(function() {
-			const intervalId = setInterval( () => {
-				// Close the connection if a pong was not received since the last check.
-				if ( !ws[ "isAlive" ] ) {
-					ws.terminate();
-					clearInterval(intervalId);
-					return;
-				}
-
-				ws[ "isAlive" ] = false;
-				ws.ping();
-			}, 10 * 1000 );
-		})();
-
 		console.log( `A client connected with device key '${ deviceKey }'.` );
 	} );
 }
@@ -133,6 +166,7 @@ export const forwardRequest = ( req: express.Request, res: express.Response ) =>
 	}
 
 	if ( !connectedControllers.has( deviceKey ) ) {
+		console.log(connectedControllers.keys());
 		res.status( 404 ).json( { message: "Specified device does not exist or is not connected." } );
 		return;
 	}

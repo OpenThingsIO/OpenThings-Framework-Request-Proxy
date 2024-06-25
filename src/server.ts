@@ -1,8 +1,8 @@
-import * as bodyParser from "body-parser";
-import * as express from "express";
-import * as forwarder from "./routes/forwarder";
+import bodyParser from "body-parser";
+import express from "express";
+import { forwardRequest } from "./routes/forwarder";
 import { config as dotenv_config } from "dotenv"
-import * as cors from "cors";
+import cors from "cors";
 
 dotenv_config();
 
@@ -17,7 +17,7 @@ app.use( bodyParser.text( { type: "*/*", limit: "1mb" } ) );
 app.all( "/forward/v1/:deviceKey$", ( req, res, next ) => {
 	res.redirect( 301, req.url + "/" );
 } );
-app.all( "/forward/v1/:deviceKey*?", forwarder.forwardRequest );
+app.all( "/forward/v1/:deviceKey*?", forwardRequest );
 
 app.listen( port, host, () => {
 	console.log( "%s v%s now listening on %s:%d", process.env.npm_package_description, process.env.npm_package_version, host, port );
