@@ -3,3 +3,4 @@ js
 .idea
 *.iml
 private
+dist
