@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import WebSocket, { Server as WebSocketServer } from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { IncomingMessage } from "http";
 import { URL } from "url";
 import { AuthenticationPlugin } from "../AuthenticationPlugin";
@@ -10,11 +10,11 @@ let server: WebSocketServer;
 const connectedControllers: Map<String, WebSocket> = new Map();
 const pendingResponses: Map<String, {res: Response, logger: Logger}> = new Map();
 
-export async function setupWebsockets(logger: Logger, host: string) {
+export async function setupWebsockets(authPluginRoot: string, logger: Logger, host: string) {
     // Load the specified authentication plugin.
     if (
         !fs.existsSync(
-            `${__dirname}/../authenticationPlugins/${process.env.AUTHENTICATION_PLUGIN}.js`
+            `${authPluginRoot}/authenticationPlugins/${process.env.AUTHENTICATION_PLUGIN}.js`
         )
     ) {
         logger.error(
@@ -22,16 +22,15 @@ export async function setupWebsockets(logger: Logger, host: string) {
         );
         process.exit(1);
     }
-    const authPlugin: AuthenticationPlugin =
-        new (require("../authenticationPlugins/" +
-            process.env.AUTHENTICATION_PLUGIN).default)();
+    const authPlugin: AuthenticationPlugin = new ((await import(`${authPluginRoot}/authenticationPlugins/${process.env.AUTHENTICATION_PLUGIN}.js`)).default.default)();
 
     try {
         logger.info("Initializing authentication plugin...");
         await authPlugin.init(logger.child({ name: "auth", plugin: process.env.AUTHENTICATION_PLUGIN }));
         logger.info("Initialized authentication plugin");
     } catch (err) {
-        logger.error("Fatal error initializing authentication plugin", err);
+        console.log(err);
+        logger.error("Fatal error initializing authentication plugin %o", err);
         process.exit(1);
     }
 

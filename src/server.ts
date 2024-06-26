@@ -34,7 +34,9 @@ dotenv_config();
 const host = process.env.HOST || "127.0.0.1";
 const port = parseInt(process.env.HTTP_PORT) || 3000;
 
-setupWebsockets(logger, host);
+const authPluginRoot = `${__dirname}`;
+
+setupWebsockets(authPluginRoot, logger, host);
 
 const app = express();
 

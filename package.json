@@ -5,14 +5,15 @@
 	"license": "GPL-3.0",
 	"description": "OpenThings request forwarding server",
 	"scripts": {
-		"compile": "tsc",
-		"start": "node js/server.js",
+		"compile": "node build.mjs",
+		"start": "node dist/index.cjs",
 		"test": "echo \"Error: no test specified\" && exit 1"
 	},
 	"dependencies": {
 		"body-parser": "^1.20.2",
 		"cors": "^2.8.5",
 		"dotenv": "^16.4.5",
+		"esbuild": "^0.21.5",
 		"express": "^4.19.2",
 		"mysql": "^2.18.1",
 		"pino": "^9.2.0",
