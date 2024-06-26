@@ -79,7 +79,7 @@ jobs:
       - name: Build and Push image
         uses: docker/build-push-action@v6
         with:
-          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm/v7,linux/arm64' }}
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           # Skip pushing when PR from a fork
           push: ${{ !github.event.pull_request.head.repo.fork }}
           cache-from: type=registry,ref=ghcr.io/${{ steps.lower-owner.outputs.owner }}/openthings-build-cache:openthings
