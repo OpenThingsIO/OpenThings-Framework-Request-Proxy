@@ -8,7 +8,7 @@ import { Logger } from "pino";
 
 let server: WebSocketServer;
 const connectedControllers: Map<String, WebSocket> = new Map();
-const pendingResponses: Map<String, Response> = new Map();
+const pendingResponses: Map<String, {res: Response, logger: Logger}> = new Map();
 
 export async function setupWebsockets(logger: Logger, host: string) {
     // Load the specified authentication plugin.
@@ -175,7 +175,8 @@ export async function setupWebsockets(logger: Logger, host: string) {
                 return;
             }
 
-            const res: Response = pendingResponses.get(requestKey);
+            const {res, logger} = pendingResponses.get(requestKey);
+            logger.trace(`Received response from device with key '${deviceKey}'`);
             pendingResponses.delete(requestKey);
 
             res.socket.write(body);
@@ -219,6 +220,9 @@ export const forwardRequest = (req: Request, res: Response) => {
     const requestId = Math.floor(Math.random() * 0x10000)
         .toString(16)
         .padStart(4, "0");
-    pendingResponses.set(`${deviceKey}:${requestId}`, res);
+
+    const responseLogger = req.log.child({ requestId });
+    responseLogger.trace(`Forwarding request to device with key '${deviceKey}'`);
+    pendingResponses.set(`${deviceKey}:${requestId}`, {res, logger: responseLogger});
     ws.send(`FWD: ${requestId}\r\n${rawRequest}`);
 };
