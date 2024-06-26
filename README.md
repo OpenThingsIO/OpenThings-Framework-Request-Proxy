@@ -13,7 +13,7 @@ Prerequisites: [Git](https://git-scm.com/), [Node.js and NPM](https://nodejs.org
 git clone https://github.com/openthingsio/OTF-Request-Proxy.git
 cd OTF-Request-Proxy
 npm install
-npm run compile
+npm run build
 # Make sure you configure the service (see below) before starting it
 npm start
 ```

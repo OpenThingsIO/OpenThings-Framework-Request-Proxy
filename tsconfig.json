@@ -1,13 +1,14 @@
 {
-	"compilerOptions": {
-		"target": "es5",
-		"noImplicitReturns": true,
-		"noEmitOnError": true,
-		"outDir": "dist/",
-		"sourceMap": true,
-		"skipLibCheck": true
-	},
-	"include": [
-		"src/**/*"
-	]
+    "compilerOptions": {
+        "target": "ESNext",
+        "module": "ESNext",
+        "moduleResolution": "Node10",
+        "noImplicitReturns": true,
+        "noEmitOnError": true,
+        "outDir": "js/",
+        "sourceMap": true,
+        "skipLibCheck": true,
+        "allowSyntheticDefaultImports": true
+    },
+    "include": ["src/**/*"]
 }

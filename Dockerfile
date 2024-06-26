@@ -5,9 +5,10 @@ COPY /tsconfig.json ./
 COPY /package.json ./
 COPY /package-lock.json ./
 RUN npm install
+COPY /build.mjs ./
 
 COPY /src ./src
-RUN npm run compile
+RUN npm run build
 
 FROM node:lts-alpine
 
@@ -17,7 +18,5 @@ EXPOSE 8080
 WORKDIR /app
 COPY /package.json ./
 COPY --from=build /app/dist ./dist
-
-RUN npm install --omit=dev
 
 CMD ["npm", "run", "start"]
