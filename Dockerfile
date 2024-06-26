@@ -10,6 +10,7 @@ COPY /tsconfig.json ./
 COPY /package.json ./
 COPY /package-lock.json ./
 RUN npm install
+COPY /build.mjs ./
 
 COPY /src ./src
 RUN npm run build
