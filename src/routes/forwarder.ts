@@ -43,8 +43,7 @@ export async function setupWebsockets(
         );
         logger.info("Initialized authentication plugin");
     } catch (err) {
-        console.log(err);
-        logger.error("Fatal error initializing authentication plugin %o", err);
+        logger.error(err, "Fatal error initializing authentication plugin");
         process.exit(1);
     }
 
@@ -86,7 +85,7 @@ export async function setupWebsockets(
         try {
             isValid = await authPlugin.validateKey(deviceKey);
         } catch (err) {
-            wsLogger.error("Error validating device key", err);
+            wsLogger.error(err, "Error validating device key");
             ws.send("ERR: Error validating device key.");
             ws.terminate();
             return;
@@ -123,8 +122,8 @@ export async function setupWebsockets(
 
         ws.on("error", (err) => {
             wsLogger.error(
-                `A client with device key '${deviceKey}' errored:`,
-                err
+                err,
+                `A client with device key '${deviceKey}' errored:`
             );
             connectedControllers.delete(deviceKey);
             clearInterval(intervalId);

@@ -32,7 +32,7 @@ export default class MySQLAuthenticationPlugin extends AuthenticationPlugin {
                 [process.env.MYSQL_TABLE, deviceKey],
                 (err, results, fields) => {
                     if (err) {
-                        this.logger.error(err);
+                        this.logger.error(err, "Error querying MySQL database");
                         resolve(false);
                         return;
                     }
