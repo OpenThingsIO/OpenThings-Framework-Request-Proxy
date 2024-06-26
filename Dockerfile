@@ -14,6 +14,10 @@ FROM node:lts-alpine
 EXPOSE 3000
 EXPOSE 8080
 
-ENTRYPOINT npm run start
-
+WORKDIR /app
+COPY /package.json ./
 COPY --from=build /app/dist ./dist
+
+RUN npm install --omit=dev
+
+CMD ["npm", "run", "start"]
