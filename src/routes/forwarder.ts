@@ -8,9 +8,14 @@ import { Logger } from "pino";
 
 let server: WebSocketServer;
 const connectedControllers: Map<String, WebSocket> = new Map();
-const pendingResponses: Map<String, {res: Response, logger: Logger}> = new Map();
+const pendingResponses: Map<String, { res: Response; logger: Logger }> =
+    new Map();
 
-export async function setupWebsockets(authPluginRoot: string, logger: Logger, host: string) {
+export async function setupWebsockets(
+    authPluginRoot: string,
+    logger: Logger,
+    host: string
+) {
     // Load the specified authentication plugin.
     if (
         !fs.existsSync(
@@ -22,11 +27,20 @@ export async function setupWebsockets(authPluginRoot: string, logger: Logger, ho
         );
         process.exit(1);
     }
-    const authPlugin: AuthenticationPlugin = new ((await import(`${authPluginRoot}/authenticationPlugins/${process.env.AUTHENTICATION_PLUGIN}.js`)).default.default)();
+    const authPlugin: AuthenticationPlugin = new (
+        await import(
+            `${authPluginRoot}/authenticationPlugins/${process.env.AUTHENTICATION_PLUGIN}.js`
+        )
+    ).default.default();
 
     try {
         logger.info("Initializing authentication plugin...");
-        await authPlugin.init(logger.child({ name: "auth", plugin: process.env.AUTHENTICATION_PLUGIN }));
+        await authPlugin.init(
+            logger.child({
+                name: "auth",
+                plugin: process.env.AUTHENTICATION_PLUGIN,
+            })
+        );
         logger.info("Initialized authentication plugin");
     } catch (err) {
         console.log(err);
@@ -162,7 +176,9 @@ export async function setupWebsockets(authPluginRoot: string, logger: Logger, ho
             );
             // Ignore messages that aren't formatted like responses to forwarded requests.
             if (!match) {
-                wsLogger.warn(`Received message with invalid format: ${message} from client with device key '${deviceKey}'.`);
+                wsLogger.warn(
+                    `Received message with invalid format: ${message} from client with device key '${deviceKey}'.`
+                );
                 return;
             }
             const requestKey = `${deviceKey}:${match[1]}`;
@@ -170,12 +186,16 @@ export async function setupWebsockets(authPluginRoot: string, logger: Logger, ho
 
             // Ignore invalid request IDs.
             if (!pendingResponses.has(requestKey)) {
-                wsLogger.warn(`Received response with invalid key: ${requestKey} from client with device key '${deviceKey}'.`);
+                wsLogger.warn(
+                    `Received response with invalid key: ${requestKey} from client with device key '${deviceKey}'.`
+                );
                 return;
             }
 
-            const {res, logger} = pendingResponses.get(requestKey);
-            logger.trace(`Received response from device with key '${deviceKey}'`);
+            const { res, logger } = pendingResponses.get(requestKey);
+            logger.trace(
+                `Received response from device with key '${deviceKey}'`
+            );
             pendingResponses.delete(requestKey);
 
             res.socket.write(body);
@@ -221,7 +241,12 @@ export const forwardRequest = (req: Request, res: Response) => {
         .padStart(4, "0");
 
     const responseLogger = req.log.child({ requestId });
-    responseLogger.trace(`Forwarding request to device with key '${deviceKey}'`);
-    pendingResponses.set(`${deviceKey}:${requestId}`, {res, logger: responseLogger});
+    responseLogger.trace(
+        `Forwarding request to device with key '${deviceKey}'`
+    );
+    pendingResponses.set(`${deviceKey}:${requestId}`, {
+        res,
+        logger: responseLogger,
+    });
     ws.send(`FWD: ${requestId}\r\n${rawRequest}`);
 };

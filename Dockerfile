@@ -12,5 +12,4 @@ COPY /package-lock.json ./
 RUN npm install
 
 COPY /src ./src
-RUN ls -a
 RUN npm run build

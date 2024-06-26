@@ -1,11 +1,11 @@
 import * as esbuild from 'esbuild';
 
 await esbuild.build({
-  entryPoints: ['src/server.ts'],
-  bundle: true,
-  outfile: 'dist/index.cjs',
-  platform: 'node',
-  format: 'cjs',
+    entryPoints: ['src/server.ts'],
+    bundle: true,
+    outfile: 'dist/index.cjs',
+    platform: 'node',
+    format: 'cjs',
 });
 
 await esbuild.build({
@@ -14,4 +14,4 @@ await esbuild.build({
     outdir: 'dist/authenticationPlugins',
     platform: 'node',
     format: 'cjs',
-  });
+});
