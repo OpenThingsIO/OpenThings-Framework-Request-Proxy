@@ -1,7 +1,11 @@
 {
 	"name": "otf-request-proxy",
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"author": "Matthew Oslan",
+    "contributors": [
+        "Matthew Oslan",
+        "Andrew Friedman"
+    ],
 	"license": "GPL-3.0",
 	"description": "OpenThings request forwarding server",
 	"scripts": {
