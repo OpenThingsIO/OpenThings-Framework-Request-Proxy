@@ -43,6 +43,14 @@ const app = express();
 app.use(
     pinoHttp({
         logger: logger.child({ name: "http" }),
+        redact: {
+            paths: [
+                "req.headers.authorization",
+                "req.headers.cookie",
+                "req.query.pw",
+            ],
+            censor: "***CENSORED***",
+        },
     })
 );
 
