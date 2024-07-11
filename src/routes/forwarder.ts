@@ -6,6 +6,71 @@ import { AuthenticationPlugin } from "../AuthenticationPlugin";
 import { default as fs } from "fs";
 import { Logger } from "pino";
 
+/**
+ * Checks if a given buffer contains only correct UTF-8.
+ * From the ws library.
+ * Ported from https://www.cl.cam.ac.uk/%7Emgk25/ucs/utf8_check.c by
+ * Markus Kuhn.
+ *
+ * @param {Buffer} buf The buffer to check
+ * @return {Boolean} `true` if `buf` contains only correct UTF-8, else `false`
+ * @public
+ */
+function isValidUTF8(buf: Buffer): boolean {
+    const len = buf.length;
+    let i = 0;
+
+    while (i < len) {
+        if ((buf[i] & 0x80) === 0) {
+            // 0xxxxxxx
+            i++;
+        } else if ((buf[i] & 0xe0) === 0xc0) {
+            // 110xxxxx 10xxxxxx
+            if (
+                i + 1 === len ||
+                (buf[i + 1] & 0xc0) !== 0x80 ||
+                (buf[i] & 0xfe) === 0xc0 // Overlong
+            ) {
+                return false;
+            }
+
+            i += 2;
+        } else if ((buf[i] & 0xf0) === 0xe0) {
+            // 1110xxxx 10xxxxxx 10xxxxxx
+            if (
+                i + 2 >= len ||
+                (buf[i + 1] & 0xc0) !== 0x80 ||
+                (buf[i + 2] & 0xc0) !== 0x80 ||
+                (buf[i] === 0xe0 && (buf[i + 1] & 0xe0) === 0x80) || // Overlong
+                (buf[i] === 0xed && (buf[i + 1] & 0xe0) === 0xa0) // Surrogate (U+D800 - U+DFFF)
+            ) {
+                return false;
+            }
+
+            i += 3;
+        } else if ((buf[i] & 0xf8) === 0xf0) {
+            // 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+            if (
+                i + 3 >= len ||
+                (buf[i + 1] & 0xc0) !== 0x80 ||
+                (buf[i + 2] & 0xc0) !== 0x80 ||
+                (buf[i + 3] & 0xc0) !== 0x80 ||
+                (buf[i] === 0xf0 && (buf[i + 1] & 0xf0) === 0x80) || // Overlong
+                (buf[i] === 0xf4 && buf[i + 1] > 0x8f) ||
+                buf[i] > 0xf4 // > U+10FFFF
+            ) {
+                return false;
+            }
+
+            i += 4;
+        } else {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 let server: WebSocketServer;
 const connectedControllers: Map<String, WebSocket> = new Map();
 const pendingResponses: Map<String, { res: Response; logger: Logger }> =
@@ -50,6 +115,7 @@ export async function setupWebsockets(
     server = new WebSocketServer({
         host,
         port: parseInt(process.env.WEBSOCKET_PORT) || 8080,
+        skipUTF8Validation: true,
     });
 
     server.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
@@ -149,18 +215,51 @@ export async function setupWebsockets(
             let message: string;
             switch (typeof data) {
                 case "string":
+                    const buffer = Buffer.from(data);
+                    if (!isValidUTF8(buffer)) {
+                        wsLogger.error(
+                            { message: buffer.toString('hex') },
+                            `Received message with invalid UTF-8 encoding from client with device key '${deviceKey}'.`
+                        );
+                        return;
+                    }
+                    
                     message = data;
                     break;
                 case "object":
                     if (data instanceof Buffer) {
+                        if (!isValidUTF8(data)) {
+                            wsLogger.error(
+                                { message: data.toString('hex') },
+                                `Received message with invalid UTF-8 encoding from client with device key '${deviceKey}'.`
+                            );
+                            return;
+                        }
+                        
                         message = data.toString();
                         break;
                     } else if (data instanceof ArrayBuffer) {
-                        message = Buffer.from(data).toString();
+                        const buffer = Buffer.from(data);
+                        if (!isValidUTF8(buffer)) {
+                            wsLogger.error(
+                                { message: buffer.toString('hex') },
+                                `Received message with invalid UTF-8 encoding from client with device key '${deviceKey}'.`
+                            );
+                            return;
+                        }
+                        message = buffer.toString();
                         break;
                     } else if (data instanceof Array) {
                         // Array of buffers
-                        message = Buffer.concat(data).toString();
+                        const buffer = Buffer.concat(data);
+                        if (!isValidUTF8(buffer)) {
+                            wsLogger.error(
+                                { message: buffer.toString('hex') },
+                                `Received message with invalid UTF-8 encoding from client with device key '${deviceKey}'.`
+                            );
+                            return;
+                        }
+                        message = buffer.toString();
                     }
                     break;
                 default:
