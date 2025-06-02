@@ -73,7 +73,7 @@ function isValidUTF8(buf: Buffer): boolean {
 
 let server: WebSocketServer;
 const connectedControllers: Map<String, WebSocket> = new Map();
-const pendingResponses: Map<String, { res: Response; logger: Logger }> =
+const pendingResponses: Map<String, Map<String, { res: Response; logger: Logger }>> =
     new Map();
 
 export async function setupWebsockets(
@@ -163,6 +163,7 @@ export async function setupWebsockets(
         }
 
         connectedControllers.set(deviceKey, ws);
+        pendingResponses.set(deviceKey, new Map());
 
         // Close connections that don't respond to pings within 10 seconds.
         ws["isAlive"] = true;
@@ -177,6 +178,7 @@ export async function setupWebsockets(
                     `A client with device key '${deviceKey}' did not respond to pings.`
                 );
                 connectedControllers.delete(deviceKey);
+                pendingResponses.delete(deviceKey);
                 ws.terminate();
                 clearInterval(intervalId);
                 return;
@@ -251,7 +253,7 @@ export async function setupWebsockets(
                         break;
                     } else if (data instanceof Array) {
                         // Array of buffers
-                        const buffer = Buffer.concat(data);
+                        const buffer = Buffer.concat(data.map((e) => Uint8Array.from(e)));
                         if (!isValidUTF8(buffer)) {
                             wsLogger.error(
                                 { message: buffer.toString('hex') },
@@ -279,22 +281,31 @@ export async function setupWebsockets(
                 );
                 return;
             }
-            const requestKey = `${deviceKey}:${match[1]}`;
+            const requestKey = match[1];
             const body = match[2];
 
             // Ignore invalid request IDs.
-            if (!pendingResponses.has(requestKey)) {
+            if (!pendingResponses.has(deviceKey)) {
+                wsLogger.warn(
+                    `Received response with invalid device key '${deviceKey}'.`
+                );
+                return;
+            }
+
+            const deviceResponses = pendingResponses.get(deviceKey);
+
+            if (!deviceResponses.has(requestKey)) {
                 wsLogger.warn(
                     `Received response with invalid key: ${requestKey} from client with device key '${deviceKey}'.`
                 );
                 return;
             }
 
-            const { res, logger } = pendingResponses.get(requestKey);
+            const { res, logger } = deviceResponses.get(requestKey);
             logger.trace(
-                `Received response from device with key '${deviceKey}'`
+                `Received response for '${requestKey}' from device with key '${deviceKey}'`
             );
-            pendingResponses.delete(requestKey);
+            deviceResponses.delete(requestKey);
 
             res.socket.write(body);
             res.socket.end();
@@ -339,12 +350,33 @@ export const forwardRequest = (req: Request, res: Response) => {
         .padStart(4, "0");
 
     const responseLogger = req.log.child({ requestId });
+
     responseLogger.trace(
         `Forwarding request to device with key '${deviceKey}'`
     );
-    pendingResponses.set(`${deviceKey}:${requestId}`, {
+
+    // Ignore invalid request IDs.
+    if (!pendingResponses.has(deviceKey)) {
+        res.status(404).json({
+            message: "Specified device does not exist or is not connected.",
+        });
+        return;
+    }
+
+    const deviceResponses = pendingResponses.get(deviceKey);
+
+    deviceResponses.set(requestId, {
         res,
         logger: responseLogger,
     });
+
+    req.on("close", () => {
+        if (pendingResponses.has(deviceKey)) {
+            const deviceResponses = pendingResponses.get(deviceKey);
+
+            deviceResponses.delete(requestId);
+        }
+    });
+
     ws.send(`FWD: ${requestId}\r\n${rawRequest}`);
 };
