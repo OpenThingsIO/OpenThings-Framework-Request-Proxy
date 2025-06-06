@@ -1,6 +1,6 @@
 import bodyParser from "body-parser";
 import express from "express";
-import { forwardRequest, setupWebsockets } from "./routes/forwarder";
+import { forwardRequestV1, setupWebsockets } from "./routes/forwarder";
 import { config as dotenv_config } from "dotenv";
 import cors from "cors";
 import { pinoHttp } from "pino-http";
@@ -60,7 +60,7 @@ app.use(bodyParser.text({ type: "*/*", limit: "1mb" }));
 app.all("/forward/v1/:deviceKey$", (req, res, next) => {
     res.redirect(301, req.url + "/");
 });
-app.all("/forward/v1/:deviceKey*?", forwardRequest);
+app.all("/forward/v1/:deviceKey*?", forwardRequestV1);
 
 app.listen(port, host, () => {
     logger.info(

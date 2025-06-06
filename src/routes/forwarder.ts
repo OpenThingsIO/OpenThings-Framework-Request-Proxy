@@ -5,6 +5,8 @@ import { URL } from "url";
 import { AuthenticationPlugin } from "../AuthenticationPlugin";
 import { default as fs } from "fs";
 import { Logger } from "pino";
+import EnvironmentVariableAuthenticationPlugin from "../authenticationPlugins/EnvironmentVariableAuthenticationPlugin";
+import MySQLAuthenticationPlugin from "../authenticationPlugins/MySQLAuthenticationPlugin";
 
 /**
  * Checks if a given buffer contains only correct UTF-8.
@@ -73,8 +75,16 @@ function isValidUTF8(buf: Buffer): boolean {
 
 let server: WebSocketServer;
 const connectedControllers: Map<String, WebSocket> = new Map();
-const pendingResponses: Map<String, Map<String, { res: Response; logger: Logger }>> =
-    new Map();
+const pendingResponses: Map<
+    String,
+    Map<String, { res: Response; logger: Logger }>
+> = new Map();
+
+const AUTHENTICATION_PLUGINS: { [name: string]: AuthenticationPlugin } = {
+    EnvironmentVariableAuthenticationPlugin:
+        new EnvironmentVariableAuthenticationPlugin(),
+    MySQLAuthenticationPlugin: new MySQLAuthenticationPlugin(),
+};
 
 export async function setupWebsockets(
     authPluginRoot: string,
@@ -82,21 +92,14 @@ export async function setupWebsockets(
     host: string
 ) {
     // Load the specified authentication plugin.
-    if (
-        !fs.existsSync(
-            `${authPluginRoot}/authenticationPlugins/${process.env.AUTHENTICATION_PLUGIN}.js`
-        )
-    ) {
+    const authPlugin =
+        AUTHENTICATION_PLUGINS[process.env.AUTHENTICATION_PLUGIN];
+    if (authPlugin == undefined) {
         logger.error(
             `Authentication plugin '${process.env.AUTHENTICATION_PLUGIN}' does not exist.`
         );
         process.exit(1);
     }
-    const authPlugin: AuthenticationPlugin = new (
-        await import(
-            `${authPluginRoot}/authenticationPlugins/${process.env.AUTHENTICATION_PLUGIN}.js`
-        )
-    ).default.default();
 
     try {
         logger.info("Initializing authentication plugin...");
@@ -126,196 +129,195 @@ export async function setupWebsockets(
         });
         wsLogger.trace("A client connected");
         const url = new URL(req.url, "ws://localhost");
-        if (url.pathname !== "/socket/v1") {
+        if (url.pathname == "/socket/v1") {
+            const deviceKey = url.searchParams.get("deviceKey");
+            if (!deviceKey || typeof deviceKey !== "string") {
+                ws.send("ERR: deviceKey was not properly specified.");
+                ws.terminate();
+                return;
+            }
+            setupWebsocketConnectionCommon(authPlugin, ws, wsLogger, deviceKey);
+            setupWebsocketConnectionV1(ws, wsLogger, deviceKey);
+        } else {
             ws.send("ERR: invalid path.");
             ws.terminate();
             return;
         }
-
-        const deviceKey = url.searchParams.get("deviceKey");
-        if (!deviceKey || typeof deviceKey !== "string") {
-            ws.send("ERR: deviceKey was not properly specified.");
-            ws.terminate();
-            return;
-        }
-
-        if (connectedControllers.has(deviceKey)) {
-            ws.send(
-                "ERR: A controller with this device key is already connected."
-            );
-            ws.terminate();
-            return;
-        }
-
-        let isValid = false;
-        try {
-            isValid = await authPlugin.validateKey(deviceKey);
-        } catch (err) {
-            wsLogger.error(err, "Error validating device key");
-            ws.send("ERR: Error validating device key.");
-            ws.terminate();
-            return;
-        }
-        if (!isValid) {
-            ws.send("ERR: Invalid device key.");
-            ws.terminate();
-            return;
-        }
-
-        connectedControllers.set(deviceKey, ws);
-        pendingResponses.set(deviceKey, new Map());
-
-        // Close connections that don't respond to pings within 10 seconds.
-        ws["isAlive"] = true;
-        ws.on("pong", () => {
-            ws["isAlive"] = true;
-        });
-
-        const intervalId = setInterval(() => {
-            // Close the connection if a pong was not received since the last check.
-            if (!ws["isAlive"]) {
-                wsLogger.trace(
-                    `A client with device key '${deviceKey}' did not respond to pings.`
-                );
-                connectedControllers.delete(deviceKey);
-                pendingResponses.delete(deviceKey);
-                ws.terminate();
-                clearInterval(intervalId);
-                return;
-            }
-
-            ws["isAlive"] = false;
-            ws.ping();
-        }, 10 * 1000);
-
-        ws.on("error", (err) => {
-            wsLogger.error(
-                err,
-                `A client with device key '${deviceKey}' errored:`
-            );
-            connectedControllers.delete(deviceKey);
-            clearInterval(intervalId);
-        });
-
-        ws.on("close", (code, reason) => {
-            wsLogger.trace(
-                `A client with device key '${deviceKey}' disconnected.`
-            );
-            connectedControllers.delete(deviceKey);
-            clearInterval(intervalId);
-        });
-
-        ws.on("message", (data: WebSocket.Data, isBinary: boolean) => {
-            // Ignore binary messages.
-            if (isBinary) {
-                wsLogger.info(
-                    `Ignoring binary message from client with device key '${deviceKey}'.`
-                );
-                return;
-            }
-
-            let message: string;
-            switch (typeof data) {
-                case "string":
-                    const buffer = Buffer.from(data);
-                    if (!isValidUTF8(buffer)) {
-                        wsLogger.error(
-                            { message: buffer.toString('hex') },
-                            `Received message with invalid UTF-8 encoding from client with device key '${deviceKey}'.`
-                        );
-                        return;
-                    }
-                    
-                    message = data;
-                    break;
-                case "object":
-                    if (data instanceof Buffer) {
-                        if (!isValidUTF8(data)) {
-                            wsLogger.error(
-                                { message: data.toString('hex') },
-                                `Received message with invalid UTF-8 encoding from client with device key '${deviceKey}'.`
-                            );
-                            return;
-                        }
-                        
-                        message = data.toString();
-                        break;
-                    } else if (data instanceof ArrayBuffer) {
-                        const buffer = Buffer.from(data);
-                        if (!isValidUTF8(buffer)) {
-                            wsLogger.error(
-                                { message: buffer.toString('hex') },
-                                `Received message with invalid UTF-8 encoding from client with device key '${deviceKey}'.`
-                            );
-                            return;
-                        }
-                        message = buffer.toString();
-                        break;
-                    } else if (data instanceof Array) {
-                        // Array of buffers
-                        const buffer = Buffer.concat(data.map((e) => Uint8Array.from(e)));
-                        if (!isValidUTF8(buffer)) {
-                            wsLogger.error(
-                                { message: buffer.toString('hex') },
-                                `Received message with invalid UTF-8 encoding from client with device key '${deviceKey}'.`
-                            );
-                            return;
-                        }
-                        message = buffer.toString();
-                    }
-                    break;
-                default:
-                    wsLogger.info(
-                        `Received message with invalid type: ${typeof data} from client with device key '${deviceKey}'.`
-                    );
-                    return;
-            }
-
-            const match = (message as string).match(
-                /^RES: ([0-9a-f]{4})\r\n([\s\S]*)$/
-            );
-            // Ignore messages that aren't formatted like responses to forwarded requests.
-            if (!match) {
-                wsLogger.warn(
-                    `Received message with invalid format: ${message} from client with device key '${deviceKey}'.`
-                );
-                return;
-            }
-            const requestKey = match[1];
-            const body = match[2];
-
-            // Ignore invalid request IDs.
-            if (!pendingResponses.has(deviceKey)) {
-                wsLogger.warn(
-                    `Received response with invalid device key '${deviceKey}'.`
-                );
-                return;
-            }
-
-            const deviceResponses = pendingResponses.get(deviceKey);
-
-            if (!deviceResponses.has(requestKey)) {
-                wsLogger.warn(
-                    `Received response with invalid key: ${requestKey} from client with device key '${deviceKey}'.`
-                );
-                return;
-            }
-
-            const { res, logger } = deviceResponses.get(requestKey);
-            logger.trace(
-                `Received response for '${requestKey}' from device with key '${deviceKey}'`
-            );
-            deviceResponses.delete(requestKey);
-
-            res.socket.write(body);
-            res.socket.end();
-        });
-
-        wsLogger.info(`A client connected with device key '${deviceKey}'.`);
     });
 }
 
-export const forwardRequest = (req: Request, res: Response) => {
+async function setupWebsocketConnectionCommon(
+    authPlugin: AuthenticationPlugin,
+    ws: WebSocket,
+    wsLogger: Logger,
+    deviceKey: string
+) {
+    if (connectedControllers.has(deviceKey)) {
+        ws.send("ERR: A controller with this device key is already connected.");
+        ws.terminate();
+        return;
+    }
+
+    let isValid = false;
+    try {
+        isValid = await authPlugin.validateKey(deviceKey);
+    } catch (err) {
+        wsLogger.error(err, "Error validating device key");
+        ws.send("ERR: Error validating device key.");
+        ws.terminate();
+        return;
+    }
+    if (!isValid) {
+        ws.send("ERR: Invalid device key.");
+        ws.terminate();
+        return;
+    }
+
+    connectedControllers.set(deviceKey, ws);
+    pendingResponses.set(deviceKey, new Map());
+
+    // Close connections that don't respond to pings within 10 seconds.
+    ws["isAlive"] = true;
+    ws.on("pong", () => {
+        ws["isAlive"] = true;
+    });
+
+    const intervalId = setInterval(() => {
+        // Close the connection if a pong was not received since the last check.
+        if (!ws["isAlive"]) {
+            wsLogger.trace(
+                `A client with device key '${deviceKey}' did not respond to pings.`
+            );
+            connectedControllers.delete(deviceKey);
+            pendingResponses.delete(deviceKey);
+            ws.terminate();
+            clearInterval(intervalId);
+            return;
+        }
+
+        ws["isAlive"] = false;
+        ws.ping();
+    }, 10 * 1000);
+
+    ws.on("error", (err) => {
+        wsLogger.error(err, `A client with device key '${deviceKey}' errored:`);
+        connectedControllers.delete(deviceKey);
+        clearInterval(intervalId);
+    });
+
+    ws.on("close", (code, reason) => {
+        wsLogger.trace(`A client with device key '${deviceKey}' disconnected.`);
+        connectedControllers.delete(deviceKey);
+        clearInterval(intervalId);
+    });
+
+    wsLogger.info(`A client connected with device key '${deviceKey}'.`);
+}
+
+async function setupWebsocketConnectionV1(
+    ws: WebSocket,
+    wsLogger: Logger,
+    deviceKey: string
+) {
+    ws.on("message", (data: WebSocket.Data, isBinary: boolean) => {
+        // Ignore binary messages.
+        if (isBinary) {
+            wsLogger.info(
+                `Ignoring binary message from client with device key '${deviceKey}'.`
+            );
+            return;
+        }
+
+        let request: string;
+        let buffer: Buffer;
+
+        switch (typeof data) {
+            case "string":
+                buffer = Buffer.from(data);
+                break;
+            case "object":
+                if (data instanceof Buffer) {
+                    buffer = data;
+                    break;
+                } else if (data instanceof ArrayBuffer) {
+                    buffer = Buffer.from(data);
+                    break;
+                } else if (data instanceof Array) {
+                    // Array of buffers
+                    buffer = Buffer.concat(data.map((e) => Uint8Array.from(e)));
+                }
+                break;
+            default:
+                wsLogger.info(
+                    `Received message with invalid type: ${typeof data} from client with device key '${deviceKey}'.`
+                );
+                return;
+        }
+
+        const index = buffer.indexOf(0x0A);
+
+        if (index === -1) {
+            wsLogger.error(
+                { message: buffer.toString("hex") },
+                `Received message missing the request key from device key '${deviceKey}'.`
+            );
+            return;
+        }
+
+        const headerBuffer = buffer.subarray(0, index);
+
+        if (!isValidUTF8(headerBuffer)) {
+            wsLogger.error(
+                { message: headerBuffer.toString("hex") },
+                `Received message with invalid UTF-8 encoding for header from client with device key '${deviceKey}'.`
+            );
+            return;
+        }
+
+        const header = headerBuffer.toString();
+
+        const match = header.match(
+            /^RES: ([0-9a-f]{4})\r/
+        );
+        // Ignore messages that aren't formatted like responses to forwarded requests.
+        if (!match) {
+            wsLogger.warn(
+                `Received header with invalid format: ${header} from client with device key '${deviceKey}'.`
+            );
+            return;
+        }
+        const requestKey = match[1];
+        const body = buffer.subarray(index, buffer.length);
+
+        // Ignore invalid request IDs.
+        if (!pendingResponses.has(deviceKey)) {
+            wsLogger.warn(
+                `Received response with invalid device key '${deviceKey}'.`
+            );
+            return;
+        }
+
+        const deviceResponses = pendingResponses.get(deviceKey);
+
+        if (!deviceResponses.has(requestKey)) {
+            wsLogger.warn(
+                `Received response with invalid key: ${requestKey} from client with device key '${deviceKey}'.`
+            );
+            return;
+        }
+
+        const { res, logger } = deviceResponses.get(requestKey);
+        logger.trace(
+            `Received response for '${requestKey}' from device with key '${deviceKey}'`
+        );
+        deviceResponses.delete(requestKey);
+
+        res.socket.write(Uint8Array.from(body));
+        res.socket.end();
+    });
+}
+
+export const forwardRequestV1 = (req: Request, res: Response) => {
     const deviceKey = req.params.deviceKey;
     if (!deviceKey || typeof deviceKey !== "string") {
         res.status(401).json({
