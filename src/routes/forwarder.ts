@@ -228,7 +228,6 @@ async function setupWebsocketConnectionV1(
             return;
         }
 
-        let request: string;
         let buffer: Buffer;
 
         switch (typeof data) {
@@ -287,7 +286,7 @@ async function setupWebsocketConnectionV1(
             return;
         }
         const requestKey = match[1];
-        const body = buffer.subarray(index, buffer.length);
+        const body = buffer.subarray(index + 1, buffer.length);
 
         // Ignore invalid request IDs.
         if (!pendingResponses.has(deviceKey)) {
