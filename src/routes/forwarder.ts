@@ -182,16 +182,23 @@ async function setupWebsocketConnectionCommon(
         ws["isAlive"] = true;
     });
 
+    function terminate() {
+        connectedControllers.delete(deviceKey);
+        pendingResponses.get(deviceKey).forEach((v) => {
+            v.res.status(502).send("Controller disconnected."); // Bad gateway
+        });
+        pendingResponses.delete(deviceKey);
+        clearInterval(intervalId);
+    }
+
     const intervalId = setInterval(() => {
         // Close the connection if a pong was not received since the last check.
         if (!ws["isAlive"]) {
             wsLogger.trace(
                 `A client with device key '${deviceKey}' did not respond to pings.`
             );
-            connectedControllers.delete(deviceKey);
-            pendingResponses.delete(deviceKey);
             ws.terminate();
-            clearInterval(intervalId);
+            terminate();
             return;
         }
 
@@ -201,14 +208,12 @@ async function setupWebsocketConnectionCommon(
 
     ws.on("error", (err) => {
         wsLogger.error(err, `A client with device key '${deviceKey}' errored:`);
-        connectedControllers.delete(deviceKey);
-        clearInterval(intervalId);
+        terminate();
     });
 
     ws.on("close", (code, reason) => {
-        wsLogger.trace(`A client with device key '${deviceKey}' disconnected.`);
-        connectedControllers.delete(deviceKey);
-        clearInterval(intervalId);
+        wsLogger.trace({code, reason}, `A client with device key '${deviceKey}' disconnected.`);
+        terminate();
     });
 
     wsLogger.info(`A client connected with device key '${deviceKey}'.`);
@@ -374,7 +379,6 @@ export const forwardRequestV1 = (req: Request, res: Response) => {
     req.on("close", () => {
         if (pendingResponses.has(deviceKey)) {
             const deviceResponses = pendingResponses.get(deviceKey);
-
             deviceResponses.delete(requestId);
         }
     });
