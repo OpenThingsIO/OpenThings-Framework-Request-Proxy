@@ -184,10 +184,12 @@ async function setupWebsocketConnectionCommon(
 
     function terminate() {
         connectedControllers.delete(deviceKey);
-        pendingResponses.get(deviceKey).forEach((v) => {
-            v.res.status(502).send("Controller disconnected."); // Bad gateway
-        });
-        pendingResponses.delete(deviceKey);
+        if (pendingResponses.has(deviceKey)) {
+            pendingResponses.get(deviceKey).forEach((v) => {
+                v.res.status(502).send("Controller disconnected."); // Bad gateway
+            });
+            pendingResponses.delete(deviceKey);
+        }
         clearInterval(intervalId);
     }
 
