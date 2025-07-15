@@ -186,7 +186,7 @@ async function setupWebsocketConnectionCommon(
         connectedControllers.delete(deviceKey);
         if (pendingResponses.has(deviceKey)) {
             pendingResponses.get(deviceKey).forEach((v) => {
-                v.res.status(502).send("Controller disconnected."); // Bad gateway
+                v.res.status(408).send("Controller disconnected."); // Client timeout
             });
             pendingResponses.delete(deviceKey);
         }
