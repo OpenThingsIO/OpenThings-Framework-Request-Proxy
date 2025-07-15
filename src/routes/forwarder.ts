@@ -186,7 +186,9 @@ async function setupWebsocketConnectionCommon(
         connectedControllers.delete(deviceKey);
         if (pendingResponses.has(deviceKey)) {
             pendingResponses.get(deviceKey).forEach((v) => {
-                v.res.status(408).send("Controller disconnected."); // Client timeout
+                v.res.status(408).send({
+                    message: "Controller disconnected.",
+                }); // Client timeout
             });
             pendingResponses.delete(deviceKey);
         }
@@ -209,13 +211,33 @@ async function setupWebsocketConnectionCommon(
     }, 10 * 1000);
 
     ws.on("error", (err) => {
-        wsLogger.error(err, `A client with device key '${deviceKey}' errored:`);
-        ws.terminate();
-        terminate();
+        if (err.message == "Invalid WebSocket frame: invalid opcode 0") {
+            // Handle dropped start of fragmented packet gracefully
+            wsLogger.warn(
+                `A client with device key '${deviceKey}' dropped the start of a fragmented packet.`
+            );
+            if (pendingResponses.has(deviceKey)) {
+                pendingResponses.get(deviceKey).forEach((v) => {
+                    v.res.status(408).send({
+                        message: "Controller dropped packet.",
+                    }); // Client timeout
+                });
+            }
+        } else {
+            wsLogger.error(
+                err,
+                `A client with device key '${deviceKey}' errored:`
+            );
+            ws.terminate();
+            terminate();
+        }
     });
 
     ws.on("close", (code, reason) => {
-        wsLogger.trace({code, reason}, `A client with device key '${deviceKey}' disconnected.`);
+        wsLogger.trace(
+            { code, reason },
+            `A client with device key '${deviceKey}' disconnected.`
+        );
         terminate();
     });
 
@@ -261,7 +283,7 @@ async function setupWebsocketConnectionV1(
                 return;
         }
 
-        const index = buffer.indexOf(0x0A);
+        const index = buffer.indexOf(0x0a);
 
         if (index === -1) {
             wsLogger.error(
@@ -283,9 +305,7 @@ async function setupWebsocketConnectionV1(
 
         const header = headerBuffer.toString();
 
-        const match = header.match(
-            /^RES: ([0-9a-f]{4})\r/
-        );
+        const match = header.match(/^RES: ([0-9a-f]{4})\r/);
         // Ignore messages that aren't formatted like responses to forwarded requests.
         if (!match) {
             wsLogger.warn(
