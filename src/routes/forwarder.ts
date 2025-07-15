@@ -210,6 +210,7 @@ async function setupWebsocketConnectionCommon(
 
     ws.on("error", (err) => {
         wsLogger.error(err, `A client with device key '${deviceKey}' errored:`);
+        ws.terminate();
         terminate();
     });
 
