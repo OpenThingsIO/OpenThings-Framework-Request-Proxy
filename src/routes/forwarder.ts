@@ -399,7 +399,10 @@ export const forwardRequestV1 = (req: Request, res: Response) => {
         logger: responseLogger,
     });
 
-    req.on("close", () => {
+    // IncomingMessage emits "close" when a request body has been fully read,
+    // not only when the browser disconnects. ServerResponse "close" tracks
+    // the client connection while we wait for the controller's response.
+    res.on("close", () => {
         if (pendingResponses.has(deviceKey)) {
             const deviceResponses = pendingResponses.get(deviceKey);
             deviceResponses.delete(requestId);
