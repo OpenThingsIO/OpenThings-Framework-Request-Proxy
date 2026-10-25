@@ -16,8 +16,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test:
+    name: Local regression tests (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: ["22.18.0", "24.19.0"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
   build-docker:
     name: Build Docker
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

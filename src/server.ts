@@ -1,73 +1,38 @@
-import bodyParser from "body-parser";
-import express from "express";
-import { forwardRequestV1, setupWebsockets } from "./routes/forwarder";
+import { once } from "events";
 import { config as dotenv_config } from "dotenv";
-import cors from "cors";
-import { pinoHttp } from "pino-http";
 import { pino, LevelWithSilent } from "pino";
-
-function getLogLevel(): LevelWithSilent {
-    switch (process.env.LOG_LEVEL) {
-        case "trace":
-            return "trace";
-        case "debug":
-            return "debug";
-        case "info":
-            return "info";
-        case "warn":
-            return "warn";
-        case "error":
-            return "error";
-        case "fatal":
-            return "fatal";
-        case "silent":
-            return "silent";
-        default:
-            return "info";
-    }
-}
-
-const logger = pino({ level: getLogLevel() });
+import { setupWebsockets } from "./routes/forwarder";
+import { createHttpApp } from "./httpApp";
+import EnvironmentVariableAuthenticationPlugin from "./authenticationPlugins/EnvironmentVariableAuthenticationPlugin";
+import MySQLAuthenticationPlugin from "./authenticationPlugins/MySQLAuthenticationPlugin";
+import { ConfigurationError, startupFailure } from "./configuration";
 
 dotenv_config();
+const levels = ["trace", "debug", "info", "warn", "error", "fatal", "silent"];
+const level = levels.includes(process.env.LOG_LEVEL) ? process.env.LOG_LEVEL : "info";
+const logger = pino({ level: level as LevelWithSilent });
 
-const host = process.env.HOST || "127.0.0.1";
-const port = parseInt(process.env.HTTP_PORT) || 3000;
+async function main(): Promise<void> {
+    const auth = process.env.AUTHENTICATION_PLUGIN === "EnvironmentVariableAuthenticationPlugin"
+        ? new EnvironmentVariableAuthenticationPlugin()
+        : process.env.AUTHENTICATION_PLUGIN === "MySQLAuthenticationPlugin"
+            ? new MySQLAuthenticationPlugin() : undefined;
+    if (!auth) throw new ConfigurationError("AUTHENTICATION_PLUGIN",
+        process.env.AUTHENTICATION_PLUGIN ? "unsupported" : "missing");
+    const host = process.env.HOST || "127.0.0.1";
+    const port = parseInt(process.env.HTTP_PORT) || 3000;
+    const proxy = await setupWebsockets(auth, logger, {
+        host, port: parseInt(process.env.WEBSOCKET_PORT) || 8080,
+    });
+    const http = createHttpApp(proxy.forwardRequestV1, logger).listen(port, host);
+    try { await once(http, "listening"); }
+    catch (error) { await proxy.close(); throw error; }
+    logger.info({ host, port }, "%s v%s now listening",
+        process.env.npm_package_description, process.env.npm_package_version);
+}
 
-const authPluginRoot = `${__dirname}`;
-
-setupWebsockets(authPluginRoot, logger, host);
-
-const app = express();
-
-app.use(
-    pinoHttp({
-        logger: logger.child({ name: "http" }),
-        redact: {
-            paths: [
-                "req.headers.authorization",
-                "req.headers.cookie",
-                "req.query.pw",
-            ],
-            censor: "***CENSORED***",
-        },
-    })
-);
-
-app.use(cors());
-app.use(bodyParser.text({ type: "*/*", limit: "1mb" }));
-// Add a trailing slash
-app.all("/forward/v1/:deviceKey$", (req, res, next) => {
-    res.redirect(301, req.url + "/");
-});
-app.all("/forward/v1/:deviceKey*?", forwardRequestV1);
-
-app.listen(port, host, () => {
-    logger.info(
-        "%s v%s now listening on %s:%d",
-        process.env.npm_package_description,
-        process.env.npm_package_version,
-        host,
-        port
-    );
+void main().catch(error => {
+    const { message, ...fields } = startupFailure(error);
+    logger.fatal(fields, message);
+    process.exitCode = 1;
 });
