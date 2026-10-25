@@ -5,6 +5,7 @@ import { setupWebsockets } from "./routes/forwarder";
 import { createHttpApp } from "./httpApp";
 import EnvironmentVariableAuthenticationPlugin from "./authenticationPlugins/EnvironmentVariableAuthenticationPlugin";
 import MySQLAuthenticationPlugin from "./authenticationPlugins/MySQLAuthenticationPlugin";
+import { ConfigurationError, startupFailure } from "./configuration";
 
 dotenv_config();
 const levels = ["trace", "debug", "info", "warn", "error", "fatal", "silent"];
@@ -16,7 +17,8 @@ async function main(): Promise<void> {
         ? new EnvironmentVariableAuthenticationPlugin()
         : process.env.AUTHENTICATION_PLUGIN === "MySQLAuthenticationPlugin"
             ? new MySQLAuthenticationPlugin() : undefined;
-    if (!auth) throw new Error("Unknown authentication plugin");
+    if (!auth) throw new ConfigurationError("AUTHENTICATION_PLUGIN",
+        process.env.AUTHENTICATION_PLUGIN ? "unsupported" : "missing");
     const host = process.env.HOST || "127.0.0.1";
     const port = parseInt(process.env.HTTP_PORT) || 3000;
     const proxy = await setupWebsockets(auth, logger, {
@@ -29,8 +31,8 @@ async function main(): Promise<void> {
         process.env.npm_package_description, process.env.npm_package_version);
 }
 
-void main().catch(() => {
-    // Startup errors can contain database URLs; do not serialize them.
-    logger.fatal({ event: "startup_failure" }, "Unable to initialize proxy; check configuration");
+void main().catch(error => {
+    const { message, ...fields } = startupFailure(error);
+    logger.fatal(fields, message);
     process.exitCode = 1;
 });

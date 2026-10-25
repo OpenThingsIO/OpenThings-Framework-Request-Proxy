@@ -8,13 +8,12 @@ test('sequential GET and POST preserve path, body and byte-exact responses', asy
     const controller = await f.connect();
     await controller.accepted();
     const body = Buffer.from([0x00, 0xff, 0xc3, 0xa9]);
-    for (const method of ['GET', 'POST', 'POST']) {
+    for (const [method, payload] of [['GET', undefined], ['POST', undefined], ['POST', 'fake-device-password']]) {
         const incoming = receive(controller.ws);
-        const pending = f.request('/s2id_gen?test=1', { method,
-            body: method === 'POST' ? 'fake-device-password' : undefined });
+        const pending = f.request('/s2id_gen?test=1', { method, body: payload });
         const frame = await incoming;
         assert.match(frame, new RegExp(`${method} /s2id_gen\\?test=1 HTTP/1\\.1`));
-        if (method === 'POST') assert.equal(frame.split('\r\n\r\n')[1], 'fake-device-password');
+        assert.equal(frame.split('\r\n\r\n')[1], payload || '');
         reply(controller.ws, id(frame), body);
         const response = await pending.response;
         assert.equal(response.status, 200);
@@ -229,6 +228,25 @@ test('redirect and HTTP error logging omit URLs, credentials, payloads and respo
         'fake-body-secret', 'fake-%FF-secret', 'local-only-fake-token']) {
         assert.equal(f.logs.text().includes(secret), false, secret);
     }
+});
+
+test('HTTP completion and lifecycle logs identify /jc and /cm without query strings', async t => {
+    const f = await fixture(t);
+    const controller = await f.connect();
+    await controller.accepted();
+    for (const endpoint of ['/jc', '/cm', '/fake-path-secret']) {
+        const incoming = receive(controller.ws);
+        const pending = f.request(`${endpoint}?pw=fake-query-secret`);
+        reply(controller.ws, id(await incoming));
+        assert.equal((await pending.response).status, 200);
+    }
+    await until(() => f.logs.records().filter(r => r.msg === 'controller response forwarded').length === 3);
+    const httpEndpoints = f.logs.records().filter(r => r.msg === 'controller response forwarded').map(r => r.req.endpoint);
+    const lifecycleEndpoints = f.logs.records().filter(r => r.event === 'request_settled').map(r => r.endpoint);
+    assert.deepEqual(httpEndpoints, ['/jc', '/cm', '/other']);
+    assert.deepEqual(lifecycleEndpoints, httpEndpoints);
+    assert.equal(f.logs.text().includes('fake-query-secret'), false);
+    assert.equal(f.logs.text().includes('fake-path-secret'), false);
 });
 
 test('full ID capacity returns a non-5xx response without forwarding', async t => {

@@ -177,3 +177,70 @@ test('rejection fallback terminates a stalled close handshake and cancels on nor
     assert.equal(f.logs.records().filter(r => r.event === 'rejection_forced_close').length, 1);
     assert.equal(f.server.clients.size, 0);
 });
+
+for (const outcome of ['success', 'error']) {
+    test(`authentication timeout closes with 1011; late ${outcome} cannot affect a replacement`, async t => {
+        let complete;
+        let fail;
+        let calls = 0;
+        const f = await fixture(t, { authenticationTimeoutMs: 30, auth: {
+            init: async () => {}, validateKey: () => ++calls === 1
+                ? new Promise((resolve, reject) => { complete = resolve; fail = reject; })
+                : Promise.resolve(true),
+        } });
+        const old = await f.connect();
+        assert.deepEqual(await old.closed, { code: 1011, reason: 'authentication timed out' });
+        assert.equal(old.socket.listenerCount('message'), 0);
+        assert.equal((await f.request().response).status, 404);
+        const replacement = await f.connect();
+        await replacement.accepted();
+        if (outcome === 'success') complete(true);
+        else fail(new Error('late backend secret'));
+        const incoming = receive(replacement.ws);
+        const pending = f.request();
+        reply(replacement.ws, id(await incoming));
+        assert.equal((await pending.response).status, 200);
+        assert.equal(f.logs.records().filter(r => r.event === 'session_accepted').length, 1);
+        assert.equal(f.logs.text().includes('late backend secret'), false);
+    });
+}
+
+test('an authenticating duplicate timing out preserves its healthy owner and pending requests', async t => {
+    let calls = 0;
+    const f = await fixture(t, { authenticationTimeoutMs: 30, auth: {
+        init: async () => {}, validateKey: () => ++calls === 1 ? Promise.resolve(true) : new Promise(() => {}),
+    } });
+    const owner = await f.connect();
+    await owner.accepted();
+    const incoming = receive(owner.ws);
+    const pending = f.request();
+    const requestId = id(await incoming);
+    const duplicate = await f.connect();
+    assert.equal((await duplicate.closed).code, 1011);
+    reply(owner.ws, requestId);
+    assert.equal((await pending.response).status, 200);
+    assert.equal(owner.ws.readyState, WebSocket.OPEN);
+});
+
+test('authentication deadline timers are cancelled on acceptance and peer departure', async t => {
+    let expired = 0;
+    const originalTimeout = global.setTimeout;
+    t.mock.method(global, 'setTimeout', (callback, ms, ...args) => originalTimeout(() => {
+        if (ms === 30) expired++;
+        callback(...args);
+    }, ms));
+    let hung = false;
+    const f = await fixture(t, { authenticationTimeoutMs: 30, auth: {
+        init: async () => {}, validateKey: () => hung ? new Promise(() => {}) : Promise.resolve(true),
+    } });
+    const owner = await f.connect();
+    await owner.accepted();
+    hung = true;
+    const abandoned = await f.connect();
+    abandoned.ws.close();
+    await abandoned.closed;
+    await delay(50);
+    assert.equal(expired, 0);
+    assert.equal(f.logs.records().filter(r => r.event === 'connection_rejected').length, 0);
+    assert.equal(owner.ws.readyState, WebSocket.OPEN);
+});

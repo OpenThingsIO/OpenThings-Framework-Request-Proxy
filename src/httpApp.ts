@@ -3,7 +3,7 @@ import cors from "cors";
 import express, { RequestHandler } from "express";
 import { Logger } from "pino";
 import { pinoHttp } from "pino-http";
-import { tokenFingerprint } from "./diagnostics";
+import { forwardedEndpoint, tokenFingerprint } from "./diagnostics";
 
 export function createHttpApp(forward: RequestHandler, logger: Logger) {
     const app = express();
@@ -20,6 +20,7 @@ export function createHttpApp(forward: RequestHandler, logger: Logger) {
                 const match = /^\/forward\/v1\/([^/?]+)/.exec(req.url || "");
                 return { id: req.id, method: req.method,
                     route: match ? "/forward/v1/:deviceKey" : "other",
+                    endpoint: forwardedEndpoint(req.url || ""),
                     tokenHash: match ? tokenFingerprint(match[1]) : undefined };
             },
             // Redirect Location headers can also contain the token and password.

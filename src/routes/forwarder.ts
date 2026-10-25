@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 import { once } from "events";
 import { Logger } from "pino";
 import { AuthenticationPlugin } from "../AuthenticationPlugin";
-import { backendErrorCode, EventLimiter, tokenFingerprint } from "../diagnostics";
+import { backendErrorCode, EventLimiter, forwardedEndpoint, tokenFingerprint } from "../diagnostics";
 import { RequestIds } from "../requestIds";
 
 /**
@@ -74,6 +74,7 @@ function isValidUTF8(buf: Buffer): boolean {
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 export const MAX_REQUEST_TIMEOUT_MS = 300_000;
+export const AUTHENTICATION_TIMEOUT_MS = 10_000;
 
 export function requestTimeout(value: unknown, logger: Logger): number {
     if (value === undefined) return DEFAULT_REQUEST_TIMEOUT_MS;
@@ -90,11 +91,13 @@ export interface ForwarderOptions {
     requestTimeoutMs?: number;
     heartbeatIntervalMs?: number;
     rejectionTimeoutMs?: number;
+    authenticationTimeoutMs?: number;
 }
 
 interface PendingResponse {
     res: Response;
     startedAt: number;
+    endpoint: string;
     timer: ReturnType<typeof setTimeout>;
     settled: boolean;
     detach: () => void;
@@ -126,6 +129,7 @@ export async function setupWebsockets(
     const timeoutMs = requestTimeout(options.requestTimeoutMs ?? process.env.REQUEST_TIMEOUT_MS, logger);
     const heartbeatMs = options.heartbeatIntervalMs ?? 10_000;
     const rejectionMs = options.rejectionTimeoutMs ?? 5_000;
+    const authenticationMs = options.authenticationTimeoutMs ?? AUTHENTICATION_TIMEOUT_MS;
     const sessions = new Map<string, Session>();
     const limiter = new EventLimiter();
     let stopping = false;
@@ -144,7 +148,8 @@ export async function setupWebsockets(
         clearTimeout(entry.timer);
         entry.detach();
         const fields = { requestId: id, reason: outcome.reason,
-            durationMs: Date.now() - entry.startedAt, pendingRequests: session.pending.size };
+            durationMs: Date.now() - entry.startedAt, endpoint: entry.endpoint,
+            pendingRequests: session.pending.size };
         session.logger.debug({ ...fields, event: "request_settled" });
         if (outcome.reason === "request_timeout") {
             limiter.log(session.logger, "warn", "request_timeout", session.connectionId, fields);
@@ -203,12 +208,16 @@ export async function setupWebsockets(
         let closed = false;
         let rejected = false;
         let rejectionTimer: ReturnType<typeof setTimeout> | undefined;
+        let authenticationTimer: ReturnType<typeof setTimeout> | undefined;
+        let cancelAuthentication: (() => void) | undefined;
         let identity = "unspecified";
 
         // Observe transport state before URL parsing or asynchronous auth.
         ws.on("close", (code) => {
             closed = true;
             clearTimeout(rejectionTimer);
+            clearTimeout(authenticationTimer);
+            cancelAuthentication?.();
             if (session) {
                 cleanup(session, "peer_close", undefined, code);
                 connectionLogger.debug({ event: "connection_closed", closeCode: code,
@@ -221,6 +230,8 @@ export async function setupWebsockets(
         ws.on("error", (error) => {
             closed = true;
             clearTimeout(rejectionTimer);
+            clearTimeout(authenticationTimer);
+            cancelAuthentication?.();
             const fragment = error.message === "Invalid WebSocket frame: invalid opcode 0";
             if (session) cleanup(session, fragment ? "fragment_error" : "transport_error",
                 fragment ? "Controller dropped packet." : "Controller disconnected.");
@@ -257,13 +268,37 @@ export async function setupWebsockets(
         connectionLogger = connectionLogger.child({ tokenHash: identity });
 
         async function authenticate(): Promise<void> {
+            if (closed || stopping || ws.readyState !== WebSocket.OPEN) return;
             let valid: boolean;
-            try { valid = await authPlugin.validateKey(key); }
+            let timedOut = false;
+            const authenticationStarted = Date.now();
+            const cancelled = new Promise<boolean>(resolve => {
+                cancelAuthentication = () => resolve(false);
+                authenticationTimer = setTimeout(() => {
+                    timedOut = true;
+                    resolve(false);
+                }, authenticationMs);
+                authenticationTimer.unref();
+            });
+            try {
+                // Promise.race also observes a late backend rejection, so it
+                // cannot become an unhandled rejection after timeout/close.
+                valid = await Promise.race([
+                    Promise.resolve().then(() => authPlugin.validateKey(key)), cancelled,
+                ]);
+            }
             catch (error) {
                 reject(1011, "authentication unavailable", { errorCode: backendErrorCode(error) });
                 return;
+            } finally {
+                clearTimeout(authenticationTimer);
+                cancelAuthentication = undefined;
             }
             if (closed || stopping || ws.readyState !== WebSocket.OPEN) return;
+            if (timedOut || Date.now() - authenticationStarted >= authenticationMs) {
+                reject(1011, "authentication timed out", { errorCode: "AUTH_TIMEOUT" });
+                return;
+            }
             if (!valid) { reject(1008, "invalid device key"); return; }
             // Final ownership check and claim are synchronous, with no await gap.
             const owner = sessions.get(key);
@@ -347,7 +382,7 @@ export async function setupWebsockets(
         for (const [name, value] of Object.entries(req.headers)) rawRequest += `${name}: ${value}\r\n`;
         rawRequest += `\r\n${typeof req.body === "string" ? req.body : ""}`;
         const entry: PendingResponse = { res, startedAt: Date.now(), settled: false,
-            timer: undefined, detach: () => {} };
+            endpoint: forwardedEndpoint(req.url), timer: undefined, detach: () => {} };
         const abandoned = () => settle(session, id, entry, { reason: "browser_departed" });
         const finished = () => settle(session, id, entry, { reason: "http_finished" });
         entry.detach = () => {

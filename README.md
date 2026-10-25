@@ -35,7 +35,11 @@ Additionally, there are some environment variables that can optionally be specif
 
 Controllers are authenticated before registration and protocol handling. A new
 connection using an already connected device key is rejected; it does not replace
-the existing owner. The existing 10-second ping interval and missed-pong policy
+the existing owner. Authentication has a ten-second deadline; timeout rejects with
+close code `1011`, and late results cannot register the connection. Disconnecting
+during authentication releases its deadline and wait state. MySQL queries also
+have a ten-second driver inactivity limit; a lookup that completes after the
+socket's deadline is ignored. The existing 10-second ping interval and missed-pong policy
 are preserved. Policy rejections use WebSocket close code `1008`; authentication
 backend failures use `1011`. Rejected connections receive an `ERR:` message and a
 close frame, with forced termination after five seconds if closing stalls.
@@ -60,10 +64,19 @@ forwarded requests. Responses on an old connection cannot answer requests on a
 replacement connection.
 
 Lifecycle logs include connection IDs, token fingerprints, cleanup/rejection
-reasons, heartbeat age, and pending counts. HTTP logging omits URLs, query strings,
-headers, and response headers to avoid leaking tokens and passwords. Malformed
+reasons, heartbeat age, and pending counts. HTTP and request-settlement logs retain
+recognized endpoint names such as `/jc`, `/cm` and `/s2id_gen`. Unknown endpoints
+are logged as `/other`; subsequent path segments are dropped. HTTP logging omits
+URLs, query strings, headers, and response headers to avoid leaking tokens and
+passwords. Startup diagnostics identify missing or invalid setting names without
+printing their values. Malformed
 payloads and raw database errors are not logged. Rejection and other repeated
 diagnostic events have bounded output and aggregation state.
+
+Both Docker stages use Node `22.18.0` on Alpine, pinned to the immutable image
+index digest in `Dockerfile`. Dependency installation uses `npm ci`. Updating the
+base image requires an intentional digest change and runtime validation; it no
+longer follows the floating Node LTS tag.
 
 ## Local validation
 
