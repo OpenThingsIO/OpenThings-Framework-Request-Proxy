@@ -24,7 +24,13 @@ export function createHttpApp(forward: RequestHandler, logger: Logger) {
                     tokenHash: match ? tokenFingerprint(match[1]) : undefined };
             },
             // Redirect Location headers can also contain the token and password.
-            res(res) { return { statusCode: res.statusCode }; },
+            res(res) {
+                // Pino's standard wrapper reports null until Express sends
+                // headers. Raw controller replies bypass that Express state.
+                const raw = res.raw as express.Response;
+                return { statusCode: raw?.locals?.controllerResponseForwarded
+                    ? raw.statusCode : res.statusCode };
+            },
             err() { return { message: "HTTP request failed" }; },
         },
     }));

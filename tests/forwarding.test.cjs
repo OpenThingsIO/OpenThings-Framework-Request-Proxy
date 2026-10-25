@@ -249,6 +249,24 @@ test('HTTP completion and lifecycle logs identify /jc and /cm without query stri
     assert.equal(f.logs.text().includes('fake-path-secret'), false);
 });
 
+test('HTTP diagnostics preserve raw controller status codes without exposing response headers', async t => {
+    const f = await fixture(t);
+    const controller = await f.connect();
+    await controller.accepted();
+    for (const status of [200, 404, 503]) {
+        const incoming = receive(controller.ws);
+        const pending = f.request();
+        const requestId = id(await incoming);
+        controller.ws.send(`RES: ${requestId}\r\nHTTP/1.1 ${status} Test\r\nContent-Length: 2\r\nX-Secret: fake-response-secret\r\n\r\nOK`);
+        const response = await pending.response;
+        assert.equal(response.status, status);
+        assert.equal(response.body.toString(), 'OK');
+    }
+    await until(() => f.logs.records().filter(r => r.res).length === 3);
+    assert.deepEqual(f.logs.records().filter(r => r.res).map(r => r.res.statusCode), [200, 404, 503]);
+    assert.equal(f.logs.text().includes('fake-response-secret'), false);
+});
+
 test('full ID capacity returns a non-5xx response without forwarding', async t => {
     const f = await fixture(t);
     const controller = await f.connect();
