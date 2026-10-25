@@ -1,6 +1,7 @@
 import { Logger } from "pino";
 import { AuthenticationPlugin } from "../AuthenticationPlugin";
 import * as mysql from "mysql";
+import { backendErrorCode } from "../diagnostics";
 
 /**
  * Validates device keys by checking if they exist in a MySQL database.
@@ -32,8 +33,11 @@ export default class MySQLAuthenticationPlugin extends AuthenticationPlugin {
                 [process.env.MYSQL_TABLE, deviceKey],
                 (err, results, fields) => {
                     if (err) {
-                        this.logger.error(err, "Error querying MySQL database");
-                        resolve(false);
+                        // mysql errors include the formatted SQL and key. The
+                        // forwarder rate-limits logging of this sanitized failure.
+                        const failure = new Error("Authentication backend unavailable");
+                        Object.assign(failure, { code: backendErrorCode(err) });
+                        reject(failure);
                         return;
                     }
 
