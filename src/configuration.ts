@@ -1,4 +1,5 @@
-type Setting = "AUTHENTICATION_PLUGIN" | "DEVICE_KEYS" | "MYSQL_TABLE" | "MYSQL_CONNECTION_URL";
+type Setting = "AUTHENTICATION_PLUGIN" | "DEVICE_KEYS" | "MYSQL_TABLE" | "MYSQL_CONNECTION_URL"
+    | "WEBSOCKET_MAX_PAYLOAD_BYTES" | "STATS_INTERVAL_MS" | "AUTH_CONCURRENCY" | "AUTH_QUEUE_LIMIT";
 
 // These messages are safe to log: they name settings, never their values.
 export class ConfigurationError extends Error {
@@ -6,6 +7,17 @@ export class ConfigurationError extends Error {
         super(`${setting} is ${reason}`);
         this.name = "ConfigurationError";
     }
+}
+
+// Report names, never configuration values (which may contain credentials).
+export function boundedInteger(setting: Setting, value: unknown, fallback: number, maximum: number): number {
+    if (value === undefined) return fallback;
+    const parsed = typeof value === "number" ? value
+        : typeof value === "string" && /^\d+$/.test(value) ? Number(value) : NaN;
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) {
+        throw new ConfigurationError(setting, "invalid");
+    }
+    return parsed;
 }
 
 export function startupFailure(error: unknown) {

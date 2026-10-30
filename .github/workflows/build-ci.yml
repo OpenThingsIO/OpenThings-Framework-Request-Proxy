@@ -22,6 +22,22 @@ jobs:
     strategy:
       matrix:
         node: ["22.18.0", "24.19.0"]
+    services:
+      mysql:
+        image: mariadb:11.8.6
+        env:
+          MARIADB_ROOT_PASSWORD: isolated-root-password
+          MARIADB_DATABASE: otf_test
+          MARIADB_USER: otf_test
+          MARIADB_PASSWORD: isolated-test-password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s --health-timeout=5s --health-retries=20
+    env:
+      OTF_TEST_MYSQL_ISOLATED: "1"
+      OTF_TEST_MYSQL_URL: mysql://otf_test:isolated-test-password@127.0.0.1:3306/otf_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
