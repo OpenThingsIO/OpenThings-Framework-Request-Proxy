@@ -6,6 +6,7 @@ import { Logger } from "pino";
 import { AuthenticationPlugin } from "../AuthenticationPlugin";
 import { backendErrorCode, EventLimiter, forwardedEndpoint, tokenFingerprint } from "../diagnostics";
 import { RequestIds } from "../requestIds";
+import { boundedInteger } from "../configuration";
 
 /**
  * Checks if a given buffer contains only correct UTF-8.
@@ -75,6 +76,7 @@ function isValidUTF8(buf: Buffer): boolean {
 export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 export const MAX_REQUEST_TIMEOUT_MS = 300_000;
 export const AUTHENTICATION_TIMEOUT_MS = 10_000;
+export const DEFAULT_WEBSOCKET_MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
 
 export function requestTimeout(value: unknown, logger: Logger): number {
     if (value === undefined) return DEFAULT_REQUEST_TIMEOUT_MS;
@@ -92,6 +94,7 @@ export interface ForwarderOptions {
     heartbeatIntervalMs?: number;
     rejectionTimeoutMs?: number;
     authenticationTimeoutMs?: number;
+    maxPayloadBytes?: number;
 }
 
 interface PendingResponse {
@@ -130,6 +133,9 @@ export async function setupWebsockets(
     const heartbeatMs = options.heartbeatIntervalMs ?? 10_000;
     const rejectionMs = options.rejectionTimeoutMs ?? 5_000;
     const authenticationMs = options.authenticationTimeoutMs ?? AUTHENTICATION_TIMEOUT_MS;
+    const maxPayload = boundedInteger("WEBSOCKET_MAX_PAYLOAD_BYTES",
+        options.maxPayloadBytes ?? process.env.WEBSOCKET_MAX_PAYLOAD_BYTES,
+        DEFAULT_WEBSOCKET_MAX_PAYLOAD_BYTES, 16 * 1024 * 1024);
     const sessions = new Map<string, Session>();
     const limiter = new EventLimiter();
     let stopping = false;
@@ -137,6 +143,7 @@ export async function setupWebsockets(
         host: options.host ?? "127.0.0.1",
         port: options.port ?? 8080,
         skipUTF8Validation: true,
+        maxPayload,
     });
 
     function settle(session: Session, id: string, entry: PendingResponse,

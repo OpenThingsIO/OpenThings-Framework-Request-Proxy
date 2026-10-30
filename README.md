@@ -30,6 +30,7 @@ Additionally, there are some environment variables that can optionally be specif
 | `HTTP_PORT` | The port that the HTTP server should listen on. | `3000` |
 | `WEBSOCKET_PORT` | The port that the websocket server should listen on. | `8080` |
 | `REQUEST_TIMEOUT_MS` | Maximum wait for a complete controller response, in milliseconds. Must be an integer from 1 to 300000; invalid values fall back to the default with a warning. | `60000` |
+| `WEBSOCKET_MAX_PAYLOAD_BYTES` | Maximum incoming WebSocket message size, including all fragments and the response envelope, before or after authentication. Integer from 1 to 16777216; invalid values prevent startup. | `4194304` (4 MiB) |
 
 ## Connection and request behavior
 
@@ -43,6 +44,8 @@ socket's deadline is ignored. The existing 10-second ping interval and missed-po
 are preserved. Policy rejections use WebSocket close code `1008`; authentication
 backend failures use `1011`. Rejected connections receive an `ERR:` message and a
 close frame, with forced termination after five seconds if closing stalls.
+Oversized incoming messages close with code `1009`. This bounds each message;
+it is not a limit on total memory or connection count.
 
 Pending requests belong to their individual controller session. A disconnected
 controller fails its pending requests with HTTP `408`, and requests for an absent

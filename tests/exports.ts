@@ -1,4 +1,5 @@
-export { setupWebsockets, requestTimeout, DEFAULT_REQUEST_TIMEOUT_MS } from "../src/routes/forwarder";
+export { setupWebsockets, requestTimeout, DEFAULT_REQUEST_TIMEOUT_MS,
+    DEFAULT_WEBSOCKET_MAX_PAYLOAD_BYTES } from "../src/routes/forwarder";
 export { createHttpApp } from "../src/httpApp";
 export { RequestIds } from "../src/requestIds";
 export { EventLimiter, tokenFingerprint, backendErrorCode } from "../src/diagnostics";
