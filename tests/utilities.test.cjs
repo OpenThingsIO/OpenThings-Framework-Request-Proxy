@@ -58,12 +58,13 @@ test('MySQL backend errors reject with a sanitized code instead of invalid-key f
     const logs = capture();
     const plugin = new MySQLAuthenticationPlugin();
     plugin.logger = logs.logger;
-    plugin.pool = { query: (_sql, args, callback) => {
+    const connection = { release: () => {}, query: (_sql, args, callback) => {
         assert.equal(args[1], token);
         callback(Object.assign(new Error(`query contained ${token}`), {
             code: 'ER_PARSE_ERROR', sql: `SELECT secret '${token}'`, sqlMessage: token,
         }));
     } };
+    plugin.pool = { getConnection: callback => callback(null, connection) };
     await assert.rejects(plugin.validateKey(token), error => {
         assert.equal(error.code, 'ER_PARSE_ERROR');
         assert.equal(error.message, 'Authentication backend unavailable');
@@ -72,8 +73,8 @@ test('MySQL backend errors reject with a sanitized code instead of invalid-key f
         return true;
     });
     assert.equal(logs.text().includes(token), false);
-    plugin.pool = { query: (_sql, _args, callback) => callback(null, []) };
+    connection.query = (_sql, _args, callback) => callback(null, []);
     assert.equal(await plugin.validateKey(token), false);
-    plugin.pool = { query: (_sql, _args, callback) => callback(null, [{}]) };
+    connection.query = (_sql, _args, callback) => callback(null, [{}]);
     assert.equal(await plugin.validateKey(token), true);
 });

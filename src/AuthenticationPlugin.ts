@@ -18,6 +18,8 @@ export abstract class AuthenticationPlugin {
      */
     public async init(logger: Logger, options?: AuthenticationInitOptions): Promise<void> {}
 
+    public async close(): Promise<void> {}
+
     /**
      * Returns a Promise that resolves with a boolean indicating if the specified device key is valid. If the Promise is
      * resolved with `false` or is rejected, access will be denied.

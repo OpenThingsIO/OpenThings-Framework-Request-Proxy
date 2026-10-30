@@ -82,6 +82,7 @@ export function backendErrorCode(error: unknown): string {
         "PROTOCOL_CONNECTION_LOST", "PROTOCOL_SEQUENCE_TIMEOUT", "ER_ACCESS_DENIED_ERROR", "ER_BAD_DB_ERROR",
         "ER_NO_SUCH_TABLE", "ER_PARSE_ERROR", "ER_CON_COUNT_ERROR",
         "POOL_ENQUEUELIMIT",
+        "POOL_CONNLIMIT", "POOL_CLOSED", "AUTH_TIMEOUT",
     ]);
     return typeof code === "string" && known.has(code) ? code : "AUTH_BACKEND_ERROR";
 }

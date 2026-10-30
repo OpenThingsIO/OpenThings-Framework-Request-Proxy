@@ -460,7 +460,12 @@ export async function setupWebsockets(
     };
 
     try { await once(server, "listening"); }
-    catch (error) { authentication.close(); telemetry.close(); throw error; }
+    catch (error) {
+        authentication.close();
+        telemetry.close();
+        await authPlugin.close?.().catch(() => {});
+        throw error;
+    }
     return { server, forwardRequestV1, stats: () => telemetry.snapshot(), close(): Promise<void> {
         if (stopPromise) return stopPromise;
         stopping = true;
@@ -468,7 +473,8 @@ export async function setupWebsockets(
         for (const session of sessions.values()) cleanup(session, "server_shutdown");
         for (const client of server.clients) client.terminate();
         stopPromise = new Promise<void>((resolve, reject) =>
-            server.close(error => error ? reject(error) : resolve())).finally(() => telemetry.close());
+            server.close(error => error ? reject(error) : resolve()))
+            .then(() => authPlugin.close?.()).finally(() => telemetry.close());
         return stopPromise;
     } };
 }

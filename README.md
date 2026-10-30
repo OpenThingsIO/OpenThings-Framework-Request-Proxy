@@ -41,8 +41,9 @@ Controllers are authenticated before registration and protocol handling. A new
 connection using an already connected device key is rejected; it does not replace
 the existing owner. Authentication has a ten-second deadline; timeout rejects with
 close code `1011`, and late results cannot register the connection. Disconnecting
-during authentication releases its deadline and wait state. MySQL queries also
-have a ten-second driver inactivity limit; a lookup that completes after the
+during authentication releases its deadline and wait state. MySQL queries have a
+driver inactivity limit capped at ten seconds and the remaining authentication
+time after connection acquisition; a lookup that completes after the
 socket's deadline is ignored. The existing 10-second ping interval and missed-pong policy
 are preserved. Policy rejections use WebSocket close code `1008`; authentication
 backend failures use `1011`. Rejected connections receive an `ERR:` message and a
@@ -137,6 +138,21 @@ The plugin can be configured through the following environment variables:
 | `AUTHENTICATION_PLUGIN` | Must be set to `MySQLAuthenticationPlugin` to use this plugin. | `MySQLAuthenticationPlugin` |
 | `MYSQL_CONNECTION_URL` | The URL of the MySQL server to connect to. | `mysql://username:password@localhost:3306/otf` |
 | `MYSQL_TABLE` | The table in the database that stores valid device keys. | `registered_devices` |
+
+The plugin uses an existence lookup with `LIMIT 1`; index `device_key` for the
+deployment's lookup workload. The pool's connection limit follows
+`AUTH_CONCURRENCY`, waiting inside the driver is disabled, and driver debug output
+is disabled to prevent SQL/key leakage. These limits override URL pool/debug
+options. Disconnected/expired callers are checked again after acquisition, before
+SQL begins. An in-progress query is not cancelled by destroying its connection;
+the driver may itself discard a connection on a fatal inactivity timeout.
+
+CI also runs real-driver integration tests against a disposable MariaDB. For
+local integration tests, explicitly set `OTF_TEST_MYSQL_ISOLATED=1` and
+`OTF_TEST_MYSQL_URL` to a disposable database named `otf_test`, then run `npm test`.
+The tests create/drop their own tables and acquire table locks. Never point this
+test URL at a shared or production database. Without these explicit test settings,
+the integration cases are skipped and the normal suite uses fake backends.
 
 
 #### EnvironmentVariableAuthenticationPlugin
