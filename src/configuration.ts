@@ -1,5 +1,5 @@
 type Setting = "AUTHENTICATION_PLUGIN" | "DEVICE_KEYS" | "MYSQL_TABLE" | "MYSQL_CONNECTION_URL"
-    | "WEBSOCKET_MAX_PAYLOAD_BYTES" | "STATS_INTERVAL_MS";
+    | "WEBSOCKET_MAX_PAYLOAD_BYTES" | "STATS_INTERVAL_MS" | "AUTH_CONCURRENCY" | "AUTH_QUEUE_LIMIT";
 
 // These messages are safe to log: they name settings, never their values.
 export class ConfigurationError extends Error {

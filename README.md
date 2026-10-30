@@ -32,6 +32,8 @@ Additionally, there are some environment variables that can optionally be specif
 | `REQUEST_TIMEOUT_MS` | Maximum wait for a complete controller response, in milliseconds. Must be an integer from 1 to 300000; invalid values fall back to the default with a warning. | `60000` |
 | `WEBSOCKET_MAX_PAYLOAD_BYTES` | Maximum incoming WebSocket message size, including all fragments and the response envelope, before or after authentication. Integer from 1 to 16777216; invalid values prevent startup. | `4194304` (4 MiB) |
 | `STATS_INTERVAL_MS` | Interval for aggregate `proxy_stats` log records. Integer from 1 to 300000; invalid values prevent startup. | `10000` |
+| `AUTH_CONCURRENCY` | Maximum running authentication operations. Integer from 1 to 100; invalid values prevent startup. | `10` |
+| `AUTH_QUEUE_LIMIT` | Maximum authentication jobs waiting to start. Integer from 1 to 10000; invalid values prevent startup. | `500` |
 
 ## Connection and request behavior
 
@@ -47,6 +49,19 @@ backend failures use `1011`. Rejected connections receive an `ERR:` message and 
 close frame, with forced termination after five seconds if closing stalls.
 Oversized incoming messages close with code `1009`. This bounds each message;
 it is not a limit on total memory or connection count.
+
+Authentication uses a bounded FIFO queue and at most one waiting/running lookup
+per key. An existing open owner's duplicate is rejected before any lookup; the
+owner is still rechecked after validation. Expired or disconnected waiters do not
+enter the backend. A running lookup retains its concurrency slot and same-key
+reservation until the backend actually finishes, even if its caller is gone.
+Queue-full or same-key contention receives close code `1011` with reason
+`authentication busy`. Capacity failures never use HTTP `401`/`403`. This does not
+require firmware backoff support and does not change heartbeat or ownership policy.
+The defaults are starting limits to validate against the deployment's database
+latency and memory budget. This queue bounds authentication work, not all sockets:
+there is no pre-upgrade connection cap, and rejected sockets may linger during the
+five-second close fallback. Reverse-proxy/OS connection limits remain necessary.
 
 Pending requests belong to their individual controller session. A disconnected
 controller fails its pending requests with HTTP `408`, and requests for an absent

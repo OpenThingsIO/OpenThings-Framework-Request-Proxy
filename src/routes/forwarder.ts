@@ -8,7 +8,7 @@ import { backendErrorCode, EventLimiter, forwardedEndpoint, tokenFingerprint } f
 import { RequestIds } from "../requestIds";
 import { boundedInteger } from "../configuration";
 import { RejectionReason, Telemetry } from "../telemetry";
-import { performance } from "perf_hooks";
+import { AuthenticationQueue } from "../authenticationQueue";
 
 /**
  * Checks if a given buffer contains only correct UTF-8.
@@ -98,6 +98,8 @@ export interface ForwarderOptions {
     authenticationTimeoutMs?: number;
     maxPayloadBytes?: number;
     statsIntervalMs?: number;
+    authenticationConcurrency?: number;
+    authenticationQueueLimit?: number;
 }
 
 interface PendingResponse {
@@ -131,7 +133,6 @@ export async function setupWebsockets(
     logger: Logger,
     options: ForwarderOptions = {}
 ) {
-    await authPlugin.init(logger.child({ name: "auth" }));
     const timeoutMs = requestTimeout(options.requestTimeoutMs ?? process.env.REQUEST_TIMEOUT_MS, logger);
     const heartbeatMs = options.heartbeatIntervalMs ?? 10_000;
     const rejectionMs = options.rejectionTimeoutMs ?? 5_000;
@@ -141,7 +142,14 @@ export async function setupWebsockets(
         DEFAULT_WEBSOCKET_MAX_PAYLOAD_BYTES, 16 * 1024 * 1024);
     const statsIntervalMs = boundedInteger("STATS_INTERVAL_MS",
         options.statsIntervalMs ?? process.env.STATS_INTERVAL_MS, 10_000, 300_000);
+    const authenticationConcurrency = boundedInteger("AUTH_CONCURRENCY",
+        options.authenticationConcurrency ?? process.env.AUTH_CONCURRENCY, 10, 100);
+    const authenticationQueueLimit = boundedInteger("AUTH_QUEUE_LIMIT",
+        options.authenticationQueueLimit ?? process.env.AUTH_QUEUE_LIMIT, 500, 10_000);
+    await authPlugin.init(logger.child({ name: "auth" }), { concurrency: authenticationConcurrency });
     const telemetry = new Telemetry(logger, statsIntervalMs);
+    const authentication = new AuthenticationQueue(authPlugin, telemetry,
+        authenticationConcurrency, authenticationQueueLimit, authenticationMs);
     const sessions = new Map<string, Session>();
     const limiter = new EventLimiter();
     let stopping = false;
@@ -239,8 +247,7 @@ export async function setupWebsockets(
         let closeObserved = false;
         let rejected = false;
         let rejectionTimer: ReturnType<typeof setTimeout> | undefined;
-        let authenticationTimer: ReturnType<typeof setTimeout> | undefined;
-        let cancelAuthentication: (() => void) | undefined;
+        const authenticationAbort = new AbortController();
         let identity = "unspecified";
 
         // Observe transport state before URL parsing or asynchronous auth.
@@ -253,8 +260,7 @@ export async function setupWebsockets(
             if (rejected) telemetry.adjust("closing", -1);
             closed = true;
             clearTimeout(rejectionTimer);
-            clearTimeout(authenticationTimer);
-            cancelAuthentication?.();
+            authenticationAbort.abort();
             if (session) {
                 cleanup(session, "peer_close", undefined, code);
                 connectionLogger.debug({ event: "connection_closed", closeCode: code,
@@ -272,8 +278,7 @@ export async function setupWebsockets(
             }
             closed = true;
             clearTimeout(rejectionTimer);
-            clearTimeout(authenticationTimer);
-            cancelAuthentication?.();
+            authenticationAbort.abort();
             const fragment = error.message === "Invalid WebSocket frame: invalid opcode 0";
             if (session) cleanup(session, fragment ? "fragment_error" : "transport_error",
                 fragment ? "Controller dropped packet." : "Controller disconnected.");
@@ -314,63 +319,32 @@ export async function setupWebsockets(
         identity = tokenFingerprint(key);
         connectionLogger = connectionLogger.child({ tokenHash: identity });
 
+        // Cheap duplicate rejection never changes ownership or enters the backend queue.
+        const currentOwner = sessions.get(key);
+        if (currentOwner && !currentOwner.closed && currentOwner.ws.readyState === WebSocket.OPEN) {
+            reject(1008, "device key already connected", {
+                ownerConnectionId: currentOwner.connectionId, ownerAgeMs: Date.now() - currentOwner.startedAt,
+                pendingRequests: currentOwner.pending.size,
+            });
+            return;
+        }
+        if (currentOwner) cleanup(currentOwner, "transport_unavailable");
+
         async function authenticate(): Promise<void> {
             if (closed || stopping || ws.readyState !== WebSocket.OPEN) return;
-            let valid: boolean;
-            let timedOut = false;
-            const authenticationStarted = Date.now();
-            const authenticationClock = performance.now();
-            let cancelledOnce = false;
-            const cancelled = new Promise<boolean>(resolve => {
-                cancelAuthentication = () => {
-                    if (cancelledOnce) return;
-                    cancelledOnce = true;
-                    telemetry.count("authentication_cancelled");
-                    resolve(false);
-                };
-                authenticationTimer = setTimeout(() => {
-                    timedOut = true;
-                    telemetry.count("authentication_timed_out");
-                    resolve(false);
-                }, authenticationMs);
-                authenticationTimer.unref();
-            });
-            const lookupStarted = performance.now();
-            telemetry.count("authentication_started");
-            telemetry.adjust("authActive", 1);
-            const validation = Promise.resolve().then(() => authPlugin.validateKey(key))
-                .then(result => {
-                    telemetry.count(result ? "authentication_valid" : "authentication_invalid");
-                    return result;
-                }, error => {
-                    telemetry.count("authentication_failed");
-                    throw error;
-                }).finally(() => {
-                    telemetry.adjust("authActive", -1);
-                    telemetry.observe("lookup", performance.now() - lookupStarted);
-                });
-            try {
-                // Promise.race also observes a late backend rejection, so it
-                // cannot become an unhandled rejection after timeout/close.
-                valid = await Promise.race([
-                    validation, cancelled,
-                ]);
-            }
-            catch (error) {
-                reject(1011, "authentication unavailable", { errorCode: backendErrorCode(error) });
-                return;
-            } finally {
-                clearTimeout(authenticationTimer);
-                cancelAuthentication = undefined;
-                telemetry.observe("authentication", performance.now() - authenticationClock);
-            }
+            const result = await authentication.submit(key, authenticationAbort.signal);
             if (closed || stopping || ws.readyState !== WebSocket.OPEN) return;
-            if (timedOut || Date.now() - authenticationStarted >= authenticationMs) {
-                if (!timedOut) telemetry.count("authentication_timed_out");
+            if (result.status === "cancelled") return;
+            if (result.status === "busy") { reject(1011, "authentication busy"); return; }
+            if (result.status === "error") {
+                reject(1011, "authentication unavailable", { errorCode: backendErrorCode(result.error) });
+                return;
+            }
+            if (result.status === "timed_out") {
                 reject(1011, "authentication timed out", { errorCode: "AUTH_TIMEOUT" });
                 return;
             }
-            if (!valid) { reject(1008, "invalid device key"); return; }
+            if (result.status === "invalid") { reject(1008, "invalid device key"); return; }
             // Final ownership check and claim are synchronous, with no await gap.
             const owner = sessions.get(key);
             if (owner) {
@@ -486,10 +460,11 @@ export async function setupWebsockets(
     };
 
     try { await once(server, "listening"); }
-    catch (error) { telemetry.close(); throw error; }
+    catch (error) { authentication.close(); telemetry.close(); throw error; }
     return { server, forwardRequestV1, stats: () => telemetry.snapshot(), close(): Promise<void> {
         if (stopPromise) return stopPromise;
         stopping = true;
+        authentication.close();
         for (const session of sessions.values()) cleanup(session, "server_shutdown");
         for (const client of server.clients) client.terminate();
         stopPromise = new Promise<void>((resolve, reject) =>
