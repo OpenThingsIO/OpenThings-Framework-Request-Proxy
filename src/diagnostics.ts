@@ -27,8 +27,10 @@ export function forwardedEndpoint(url: string): string | undefined {
 export class EventLimiter {
     private entries = new Map<string, { at: number; suppressed: number }>();
     private windowStart: number;
-    private emitted = 0;
-    private suppressed = 0;
+    // A burst of invalid keys must not starve request/protocol diagnostics.
+    private budgets = { admission: { emitted: 0, suppressed: 0 },
+        requests: { emitted: 0, suppressed: 0 }, protocol: { emitted: 0, suppressed: 0 },
+        other: { emitted: 0, suppressed: 0 } };
 
     constructor(
         private readonly windowMs = 60_000,
@@ -44,10 +46,15 @@ export class EventLimiter {
         const now = this.now();
         if (now - this.windowStart >= this.windowMs) {
             this.windowStart = now;
-            this.emitted = 0;
+            for (const budget of Object.values(this.budgets)) budget.emitted = 0;
         }
-        if (this.emitted >= this.maxEvents) {
-            this.suppressed++;
+        const category = ["connection_rejected", "rejection_forced_close", "rejected_connection_closed",
+            "pre_auth_error", "auth_closed"].includes(event) ? "admission"
+            : ["request_timeout", "response_write_failed"].includes(event) ? "requests"
+            : ["invalid_response_frame", "unknown_response_id"].includes(event) ? "protocol" : "other";
+        const budget = this.budgets[category];
+        if (budget.emitted >= this.maxEvents) {
+            budget.suppressed++;
             return;
         }
         const key = `${event}:${identity}`;
@@ -60,10 +67,10 @@ export class EventLimiter {
             this.entries.delete(this.entries.keys().next().value);
         }
         this.entries.set(key, { at: now, suppressed: 0 });
-        this.emitted++;
+        budget.emitted++;
         logger[level]({ ...fields, event,
-            suppressed: (entry?.suppressed || 0) + this.suppressed });
-        this.suppressed = 0;
+            suppressed: (entry?.suppressed || 0) + budget.suppressed });
+        budget.suppressed = 0;
     }
 }
 

@@ -6,3 +6,4 @@ export { EventLimiter, tokenFingerprint, backendErrorCode } from "../src/diagnos
 export { default as MySQLAuthenticationPlugin } from "../src/authenticationPlugins/MySQLAuthenticationPlugin";
 export { ConfigurationError, startupFailure } from "../src/configuration";
 export { forwardedEndpoint } from "../src/diagnostics";
+export { Telemetry } from "../src/telemetry";

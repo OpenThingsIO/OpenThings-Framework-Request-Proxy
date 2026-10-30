@@ -7,6 +7,8 @@ import { AuthenticationPlugin } from "../AuthenticationPlugin";
 import { backendErrorCode, EventLimiter, forwardedEndpoint, tokenFingerprint } from "../diagnostics";
 import { RequestIds } from "../requestIds";
 import { boundedInteger } from "../configuration";
+import { RejectionReason, Telemetry } from "../telemetry";
+import { performance } from "perf_hooks";
 
 /**
  * Checks if a given buffer contains only correct UTF-8.
@@ -95,6 +97,7 @@ export interface ForwarderOptions {
     rejectionTimeoutMs?: number;
     authenticationTimeoutMs?: number;
     maxPayloadBytes?: number;
+    statsIntervalMs?: number;
 }
 
 interface PendingResponse {
@@ -136,9 +139,13 @@ export async function setupWebsockets(
     const maxPayload = boundedInteger("WEBSOCKET_MAX_PAYLOAD_BYTES",
         options.maxPayloadBytes ?? process.env.WEBSOCKET_MAX_PAYLOAD_BYTES,
         DEFAULT_WEBSOCKET_MAX_PAYLOAD_BYTES, 16 * 1024 * 1024);
+    const statsIntervalMs = boundedInteger("STATS_INTERVAL_MS",
+        options.statsIntervalMs ?? process.env.STATS_INTERVAL_MS, 10_000, 300_000);
+    const telemetry = new Telemetry(logger, statsIntervalMs);
     const sessions = new Map<string, Session>();
     const limiter = new EventLimiter();
     let stopping = false;
+    let stopPromise: Promise<void> | undefined;
     const server = new WebSocketServer({
         host: options.host ?? "127.0.0.1",
         port: options.port ?? 8080,
@@ -151,14 +158,23 @@ export async function setupWebsockets(
         if (entry.settled) return;
         entry.settled = true;
         // A delayed callback must never remove a newer entry with the same ID.
-        if (session.pending.get(id) === entry) session.pending.delete(id);
+        if (session.pending.get(id) === entry) {
+            session.pending.delete(id);
+            telemetry.adjust("pendingRequests", -1);
+        }
         clearTimeout(entry.timer);
         entry.detach();
         const fields = { requestId: id, reason: outcome.reason,
             durationMs: Date.now() - entry.startedAt, endpoint: entry.endpoint,
             pendingRequests: session.pending.size };
         session.logger.debug({ ...fields, event: "request_settled" });
+        telemetry.count("requests_settled");
+        telemetry.observe("request", fields.durationMs);
+        if (outcome.reason === "controller_response") telemetry.count("controller_responses");
+        if (outcome.reason === "browser_departed") telemetry.count("browser_departures");
+        if (outcome.reason === "send_failed") telemetry.count("send_failures");
         if (outcome.reason === "request_timeout") {
+            telemetry.count("request_timeouts");
             limiter.log(session.logger, "warn", "request_timeout", session.connectionId, fields);
         }
         const res = entry.res;
@@ -184,6 +200,7 @@ export async function setupWebsockets(
         } catch {
             res.locals.controllerResponseForwarded = false;
             socket.destroy();
+            telemetry.count("response_write_failures");
             limiter.log(session.logger, "warn", "response_write_failed", session.connectionId);
         }
     }
@@ -192,6 +209,9 @@ export async function setupWebsockets(
         message = "Controller disconnected.", closeCode?: number): void {
         if (session.closed) return;
         session.closed = true;
+        telemetry.adjust("sessions", -1);
+        telemetry.count("session_cleanups");
+        if (reason === "heartbeat_expired") telemetry.count("heartbeat_expired");
         clearInterval(session.heartbeat);
         if (session.onMessage) session.ws.off("message", session.onMessage);
         if (session.onPong) session.ws.off("pong", session.onPong);
@@ -207,12 +227,16 @@ export async function setupWebsockets(
     }
 
     server.on("connection", (ws, req) => {
+        telemetry.count("connections_opened");
+        telemetry.adjust("connections", 1);
+        telemetry.adjust("unaccepted", 1);
         const connectionId = randomUUID();
         const connectedAt = Date.now();
         let connectionLogger = logger.child({ name: "ws", connectionId,
             client: req.socket.remoteAddress });
         let session: Session | undefined;
         let closed = false;
+        let closeObserved = false;
         let rejected = false;
         let rejectionTimer: ReturnType<typeof setTimeout> | undefined;
         let authenticationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -221,6 +245,12 @@ export async function setupWebsockets(
 
         // Observe transport state before URL parsing or asynchronous auth.
         ws.on("close", (code) => {
+            if (closeObserved) return;
+            closeObserved = true;
+            telemetry.count("connections_closed");
+            telemetry.adjust("connections", -1);
+            if (!session) telemetry.adjust("unaccepted", -1);
+            if (rejected) telemetry.adjust("closing", -1);
             closed = true;
             clearTimeout(rejectionTimer);
             clearTimeout(authenticationTimer);
@@ -235,6 +265,11 @@ export async function setupWebsockets(
             }
         });
         ws.on("error", (error) => {
+            if (closed) return;
+            telemetry.count("transport_error");
+            if ((error as { code?: string }).code === "WS_ERR_UNSUPPORTED_MESSAGE_LENGTH") {
+                telemetry.count("oversized_message");
+            }
             closed = true;
             clearTimeout(rejectionTimer);
             clearTimeout(authenticationTimer);
@@ -246,12 +281,17 @@ export async function setupWebsockets(
             ws.terminate();
         });
 
-        function reject(code: number, reason: string, extra: Record<string, unknown> = {}): void {
+        function reject(code: number, reason: RejectionReason, extra: Record<string, unknown> = {}): void {
             if (closed || rejected || ws.readyState !== WebSocket.OPEN) return;
             rejected = true;
+            telemetry.rejected(reason);
+            telemetry.adjust("closing", 1);
+            if (reason === "device key already connected") telemetry.count("duplicate_rejected");
+            else if (code === 1008) telemetry.count("policy_rejected");
             limiter.log(connectionLogger, "info", "connection_rejected", `${identity}:${reason}`,
                 { reason, closeCode: code, ...extra });
             rejectionTimer = setTimeout(() => {
+                telemetry.count("rejection_forced_close");
                 limiter.log(connectionLogger, "warn", "rejection_forced_close", `${identity}:${reason}`, { reason });
                 ws.terminate();
             }, rejectionMs);
@@ -279,19 +319,41 @@ export async function setupWebsockets(
             let valid: boolean;
             let timedOut = false;
             const authenticationStarted = Date.now();
+            const authenticationClock = performance.now();
+            let cancelledOnce = false;
             const cancelled = new Promise<boolean>(resolve => {
-                cancelAuthentication = () => resolve(false);
+                cancelAuthentication = () => {
+                    if (cancelledOnce) return;
+                    cancelledOnce = true;
+                    telemetry.count("authentication_cancelled");
+                    resolve(false);
+                };
                 authenticationTimer = setTimeout(() => {
                     timedOut = true;
+                    telemetry.count("authentication_timed_out");
                     resolve(false);
                 }, authenticationMs);
                 authenticationTimer.unref();
             });
+            const lookupStarted = performance.now();
+            telemetry.count("authentication_started");
+            telemetry.adjust("authActive", 1);
+            const validation = Promise.resolve().then(() => authPlugin.validateKey(key))
+                .then(result => {
+                    telemetry.count(result ? "authentication_valid" : "authentication_invalid");
+                    return result;
+                }, error => {
+                    telemetry.count("authentication_failed");
+                    throw error;
+                }).finally(() => {
+                    telemetry.adjust("authActive", -1);
+                    telemetry.observe("lookup", performance.now() - lookupStarted);
+                });
             try {
                 // Promise.race also observes a late backend rejection, so it
                 // cannot become an unhandled rejection after timeout/close.
                 valid = await Promise.race([
-                    Promise.resolve().then(() => authPlugin.validateKey(key)), cancelled,
+                    validation, cancelled,
                 ]);
             }
             catch (error) {
@@ -300,9 +362,11 @@ export async function setupWebsockets(
             } finally {
                 clearTimeout(authenticationTimer);
                 cancelAuthentication = undefined;
+                telemetry.observe("authentication", performance.now() - authenticationClock);
             }
             if (closed || stopping || ws.readyState !== WebSocket.OPEN) return;
             if (timedOut || Date.now() - authenticationStarted >= authenticationMs) {
+                if (!timedOut) telemetry.count("authentication_timed_out");
                 reject(1011, "authentication timed out", { errorCode: "AUTH_TIMEOUT" });
                 return;
             }
@@ -320,6 +384,9 @@ export async function setupWebsockets(
                 startedAt: connectedAt, lastPongAt: Date.now(), isAlive: true,
                 closed: false, pending: new Map(), ids: new RequestIds() };
             sessions.set(key, session);
+            telemetry.adjust("unaccepted", -1);
+            telemetry.adjust("sessions", 1);
+            telemetry.count("sessions_accepted");
             const accepted = session;
             accepted.onPong = () => {
                 if (accepted.closed) return;
@@ -349,6 +416,7 @@ export async function setupWebsockets(
                 const match = !binary && isValidUTF8(header)
                     ? /^RES: ([0-9a-f]{4})\r$/.exec(header.toString()) : null;
                 if (!match) {
+                    telemetry.count("invalid_response_frame");
                     limiter.log(connectionLogger, "warn", "invalid_response_frame", identity,
                         { length: buffer.length, reason: binary ? "binary" : "invalid_header" });
                     return;
@@ -356,6 +424,7 @@ export async function setupWebsockets(
                 const id = match[1];
                 const entry = accepted.pending.get(id);
                 if (!entry) {
+                    telemetry.count("unknown_response_id");
                     limiter.log(connectionLogger, "debug", "unknown_response_id", identity, { requestId: id });
                     return;
                 }
@@ -404,8 +473,10 @@ export async function setupWebsockets(
             { reason: "request_timeout", message: "Controller did not respond." }), timeoutMs);
         entry.timer.unref();
         session.pending.set(id, entry);
+        telemetry.adjust("pendingRequests", 1);
         if (res.destroyed || !res.socket || res.socket.destroyed) { abandoned(); return; }
         try {
+            telemetry.count("forwarded_requests");
             session.ws.send(`FWD: ${id}\r\n${rawRequest}`, (error) => {
                 if (error) settle(session, id, entry, { reason: "send_failed", message: "Controller disconnected." });
             });
@@ -414,11 +485,15 @@ export async function setupWebsockets(
         }
     };
 
-    await once(server, "listening");
-    return { server, forwardRequestV1, async close(): Promise<void> {
+    try { await once(server, "listening"); }
+    catch (error) { telemetry.close(); throw error; }
+    return { server, forwardRequestV1, stats: () => telemetry.snapshot(), close(): Promise<void> {
+        if (stopPromise) return stopPromise;
         stopping = true;
         for (const session of sessions.values()) cleanup(session, "server_shutdown");
         for (const client of server.clients) client.terminate();
-        await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        stopPromise = new Promise<void>((resolve, reject) =>
+            server.close(error => error ? reject(error) : resolve())).finally(() => telemetry.close());
+        return stopPromise;
     } };
 }

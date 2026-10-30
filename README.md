@@ -31,6 +31,7 @@ Additionally, there are some environment variables that can optionally be specif
 | `WEBSOCKET_PORT` | The port that the websocket server should listen on. | `8080` |
 | `REQUEST_TIMEOUT_MS` | Maximum wait for a complete controller response, in milliseconds. Must be an integer from 1 to 300000; invalid values fall back to the default with a warning. | `60000` |
 | `WEBSOCKET_MAX_PAYLOAD_BYTES` | Maximum incoming WebSocket message size, including all fragments and the response envelope, before or after authentication. Integer from 1 to 16777216; invalid values prevent startup. | `4194304` (4 MiB) |
+| `STATS_INTERVAL_MS` | Interval for aggregate `proxy_stats` log records. Integer from 1 to 300000; invalid values prevent startup. | `10000` |
 
 ## Connection and request behavior
 
@@ -75,6 +76,16 @@ passwords. Startup diagnostics identify missing or invalid setting names without
 printing their values. Malformed
 payloads and raw database errors are not logged. Rejection and other repeated
 diagnostic events have bounded output and aggregation state.
+
+Aggregate `proxy_stats` records include cumulative counters (including suppressed
+rejections), counter deltas since the previous record, current/high-water gauges,
+fixed cumulative latency buckets, process memory/CPU and event-loop measurements.
+Running authentication remains counted until the backend actually finishes, even
+after the socket closes. Memory `arrayBuffers` overlaps `external`; do not add them
+together. Admission, request and protocol warnings have separate bounded log
+budgets. Aggregate metrics contain no per-token labels and have no public HTTP
+endpoint. These records describe this Node process; correlate them with separate
+reverse-proxy/container/host measurements to investigate incidents.
 
 Both Docker stages use Node `22.18.0` on Alpine, pinned to the immutable image
 index digest in `Dockerfile`. Dependency installation uses `npm ci`. Updating the

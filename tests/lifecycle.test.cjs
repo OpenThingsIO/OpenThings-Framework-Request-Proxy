@@ -101,6 +101,7 @@ test('old close, error and heartbeat callbacks cannot affect replacement request
     await old.accepted();
     const lateClose = old.socket.listeners('close')[0];
     const lateError = old.socket.listeners('error')[0];
+    const oldCallbacks = callbacks.slice();
     const oldIncoming = receive(old.ws);
     const oldRequest = f.request();
     await oldIncoming;
@@ -114,7 +115,7 @@ test('old close, error and heartbeat callbacks cannot affect replacement request
     const requestId = id(await incoming);
     lateClose(1006);
     lateError(new Error('old transport error'));
-    callbacks[0]();
+    for (const callback of oldCallbacks) callback();
     lateClose(1006);
     reply(replacement.ws, requestId, 'NEW');
     assert.equal((await pending.response).body.toString(), 'NEW');
