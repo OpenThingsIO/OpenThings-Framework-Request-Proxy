@@ -77,6 +77,26 @@ test('isolated MySQL: occupied pool fails promptly instead of retaining a hidden
     assert.equal(await plugin.validateKey(token), true);
 });
 
+test('isolated MySQL: abort during actual connection acquisition prevents SQL', options, async t => {
+    const db = await database(t);
+    const plugin = await db.plugin();
+    const abort = new AbortController();
+    let queries = 0;
+    plugin.pool.on('connection', connection => {
+        const original = connection.query;
+        connection.query = function (...args) { queries++; return original.apply(this, args); };
+    });
+    const abandon = () => abort.abort();
+    plugin.pool.on('acquire', abandon);
+    await assert.rejects(plugin.validateKey(token, { signal: abort.signal, remainingMs: () => 1000 }),
+        error => error.code === 'AUTH_TIMEOUT');
+    assert.equal(queries, 0);
+    assert.equal(plugin.pool._freeConnections.length, 1);
+    plugin.pool.off('acquire', abandon);
+    assert.equal(await plugin.validateKey(token), true);
+    assert.equal(queries, 1);
+});
+
 test('isolated MySQL: disconnected running SQL retains its slot and abandoned waiter never runs', options, async t => {
     const db = await database(t);
     const f = await db.proxy({ authenticationTimeoutMs: 2000 });

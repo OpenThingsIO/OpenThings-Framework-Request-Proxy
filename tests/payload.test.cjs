@@ -59,3 +59,32 @@ test('oversized fragmented messages are rejected before delayed authentication c
     assert.equal((await f.request().response).status, 404);
     assert.equal(f.logs.records().some(r => r.event === 'session_accepted'), false);
 });
+
+for (const offset of [-1, 0, 1]) {
+    test(`default 4 MiB message boundary ${offset >= 0 ? '+' : ''}${offset} works across fragments`, async t => {
+        const f = await fixture(t, { requestTimeoutMs: 5000 });
+        const controller = await f.connect();
+        await controller.accepted();
+        const incoming = receive(controller.ws);
+        const pending = f.request();
+        const requestId = id(await incoming);
+        const size = DEFAULT_WEBSOCKET_MAX_PAYLOAD_BYTES + offset;
+        let prefix = `RES: ${requestId}\r\nHTTP/1.1 200 OK\r\nContent-Length: 0000000\r\n\r\n`;
+        const bodyLength = size - Buffer.byteLength(prefix);
+        prefix = prefix.replace('0000000', String(bodyLength));
+        const frame = Buffer.alloc(size, 0x78);
+        frame.write(prefix);
+        const middle = Math.floor(size / 2);
+        controller.ws.send(frame.subarray(0, middle), { binary: false, fin: false });
+        controller.ws.send(frame.subarray(middle), { binary: false, fin: true });
+        const response = await pending.response;
+        if (offset <= 0) {
+            assert.equal(response.status, 200);
+            assert.equal(response.body.length, bodyLength);
+            assert.ok(response.body.every(byte => byte === 0x78));
+        } else {
+            assert.equal((await controller.closed).code, 1009);
+            assert.equal(response.status, 408);
+        }
+    });
+}
