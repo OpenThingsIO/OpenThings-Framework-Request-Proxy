@@ -1,12 +1,11 @@
-import { Request, Response } from "express";
+import { RequestHandler, Response } from "express";
 import WebSocket, { WebSocketServer } from "ws";
-import { IncomingMessage } from "http";
-import { URL } from "url";
-import { AuthenticationPlugin } from "../AuthenticationPlugin";
-import { default as fs } from "fs";
+import { randomUUID } from "crypto";
+import { once } from "events";
 import { Logger } from "pino";
-import EnvironmentVariableAuthenticationPlugin from "../authenticationPlugins/EnvironmentVariableAuthenticationPlugin";
-import MySQLAuthenticationPlugin from "../authenticationPlugins/MySQLAuthenticationPlugin";
+import { AuthenticationPlugin } from "../AuthenticationPlugin";
+import { backendErrorCode, EventLimiter, forwardedEndpoint, tokenFingerprint } from "../diagnostics";
+import { RequestIds } from "../requestIds";
 
 /**
  * Checks if a given buffer contains only correct UTF-8.
@@ -73,338 +72,346 @@ function isValidUTF8(buf: Buffer): boolean {
     return true;
 }
 
-let server: WebSocketServer;
-const connectedControllers: Map<String, WebSocket> = new Map();
-const pendingResponses: Map<
-    String,
-    Map<String, { res: Response; logger: Logger }>
-> = new Map();
+export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+export const MAX_REQUEST_TIMEOUT_MS = 300_000;
+export const AUTHENTICATION_TIMEOUT_MS = 10_000;
 
-const AUTHENTICATION_PLUGINS: { [name: string]: AuthenticationPlugin } = {
-    EnvironmentVariableAuthenticationPlugin:
-        new EnvironmentVariableAuthenticationPlugin(),
-    MySQLAuthenticationPlugin: new MySQLAuthenticationPlugin(),
-};
+export function requestTimeout(value: unknown, logger: Logger): number {
+    if (value === undefined) return DEFAULT_REQUEST_TIMEOUT_MS;
+    const parsed = typeof value === "string" && value.trim() !== "" ? Number(value)
+        : typeof value === "number" ? value : NaN;
+    if (Number.isInteger(parsed) && parsed > 0 && parsed <= MAX_REQUEST_TIMEOUT_MS) return parsed;
+    logger.warn({ event: "invalid_request_timeout", defaultMs: DEFAULT_REQUEST_TIMEOUT_MS });
+    return DEFAULT_REQUEST_TIMEOUT_MS;
+}
 
+export interface ForwarderOptions {
+    host?: string;
+    port?: number;
+    requestTimeoutMs?: number;
+    heartbeatIntervalMs?: number;
+    rejectionTimeoutMs?: number;
+    authenticationTimeoutMs?: number;
+}
+
+interface PendingResponse {
+    res: Response;
+    startedAt: number;
+    endpoint: string;
+    timer: ReturnType<typeof setTimeout>;
+    settled: boolean;
+    detach: () => void;
+}
+
+interface Session {
+    ws: WebSocket;
+    key: string;
+    connectionId: string;
+    logger: Logger;
+    startedAt: number;
+    lastPongAt: number;
+    isAlive: boolean;
+    closed: boolean;
+    pending: Map<string, PendingResponse>;
+    ids: RequestIds;
+    heartbeat?: ReturnType<typeof setInterval>;
+    onMessage?: (data: WebSocket.RawData, binary: boolean) => void;
+    onPong?: () => void;
+}
+
+// Each instance owns its maps; tests and staged instances cannot share sessions.
 export async function setupWebsockets(
-    authPluginRoot: string,
+    authPlugin: AuthenticationPlugin,
     logger: Logger,
-    host: string
+    options: ForwarderOptions = {}
 ) {
-    // Load the specified authentication plugin.
-    const authPlugin =
-        AUTHENTICATION_PLUGINS[process.env.AUTHENTICATION_PLUGIN];
-    if (authPlugin == undefined) {
-        logger.error(
-            `Authentication plugin '${process.env.AUTHENTICATION_PLUGIN}' does not exist.`
-        );
-        process.exit(1);
-    }
-
-    try {
-        logger.info("Initializing authentication plugin...");
-        await authPlugin.init(
-            logger.child({
-                name: "auth",
-                plugin: process.env.AUTHENTICATION_PLUGIN,
-            })
-        );
-        logger.info("Initialized authentication plugin");
-    } catch (err) {
-        logger.error(err, "Fatal error initializing authentication plugin");
-        process.exit(1);
-    }
-
-    server = new WebSocketServer({
-        host,
-        port: parseInt(process.env.WEBSOCKET_PORT) || 8080,
+    await authPlugin.init(logger.child({ name: "auth" }));
+    const timeoutMs = requestTimeout(options.requestTimeoutMs ?? process.env.REQUEST_TIMEOUT_MS, logger);
+    const heartbeatMs = options.heartbeatIntervalMs ?? 10_000;
+    const rejectionMs = options.rejectionTimeoutMs ?? 5_000;
+    const authenticationMs = options.authenticationTimeoutMs ?? AUTHENTICATION_TIMEOUT_MS;
+    const sessions = new Map<string, Session>();
+    const limiter = new EventLimiter();
+    let stopping = false;
+    const server = new WebSocketServer({
+        host: options.host ?? "127.0.0.1",
+        port: options.port ?? 8080,
         skipUTF8Validation: true,
     });
 
-    server.on("connection", async (ws: WebSocket, req: IncomingMessage) => {
-        const wsLogger = logger.child({
-            client: req.socket.remoteAddress,
-            url: req.url,
-            name: "ws",
+    function settle(session: Session, id: string, entry: PendingResponse,
+        outcome: { reason: string; body?: Buffer; message?: string }): void {
+        if (entry.settled) return;
+        entry.settled = true;
+        // A delayed callback must never remove a newer entry with the same ID.
+        if (session.pending.get(id) === entry) session.pending.delete(id);
+        clearTimeout(entry.timer);
+        entry.detach();
+        const fields = { requestId: id, reason: outcome.reason,
+            durationMs: Date.now() - entry.startedAt, endpoint: entry.endpoint,
+            pendingRequests: session.pending.size };
+        session.logger.debug({ ...fields, event: "request_settled" });
+        if (outcome.reason === "request_timeout") {
+            limiter.log(session.logger, "warn", "request_timeout", session.connectionId, fields);
+        }
+        const res = entry.res;
+        if (!outcome.body && !outcome.message) return;
+        const socket = res.socket;
+        if (!socket || socket.destroyed || !socket.writable || res.destroyed || res.writableEnded) return;
+        if (res.headersSent) {
+            res.destroy();
+            return;
+        }
+        try {
+            if (outcome.body) {
+                // The controller already supplied the complete HTTP response.
+                // Mark settled BEFORE raw I/O; Express flags do not track it.
+                const status = /^HTTP\/1\.[01] ([1-5][0-9]{2})(?: |\r)/
+                    .exec(outcome.body.subarray(0, 64).toString("latin1"));
+                if (status) res.statusCode = Number(status[1]);
+                res.locals.controllerResponseForwarded = true;
+                socket.end(outcome.body);
+            } else {
+                res.status(408).json({ message: outcome.message });
+            }
+        } catch {
+            res.locals.controllerResponseForwarded = false;
+            socket.destroy();
+            limiter.log(session.logger, "warn", "response_write_failed", session.connectionId);
+        }
+    }
+
+    function cleanup(session: Session, reason: string,
+        message = "Controller disconnected.", closeCode?: number): void {
+        if (session.closed) return;
+        session.closed = true;
+        clearInterval(session.heartbeat);
+        if (session.onMessage) session.ws.off("message", session.onMessage);
+        if (session.onPong) session.ws.off("pong", session.onPong);
+        const owned = sessions.get(session.key) === session;
+        if (owned) sessions.delete(session.key);
+        const pendingRequests = session.pending.size;
+        for (const [id, entry] of session.pending) {
+            settle(session, id, entry, { reason, message });
+        }
+        session.logger.info({ event: "session_cleanup", reason, owned, closeCode,
+            pendingRequests, ageMs: Date.now() - session.startedAt,
+            lastPongAgeMs: Date.now() - session.lastPongAt });
+    }
+
+    server.on("connection", (ws, req) => {
+        const connectionId = randomUUID();
+        const connectedAt = Date.now();
+        let connectionLogger = logger.child({ name: "ws", connectionId,
+            client: req.socket.remoteAddress });
+        let session: Session | undefined;
+        let closed = false;
+        let rejected = false;
+        let rejectionTimer: ReturnType<typeof setTimeout> | undefined;
+        let authenticationTimer: ReturnType<typeof setTimeout> | undefined;
+        let cancelAuthentication: (() => void) | undefined;
+        let identity = "unspecified";
+
+        // Observe transport state before URL parsing or asynchronous auth.
+        ws.on("close", (code) => {
+            closed = true;
+            clearTimeout(rejectionTimer);
+            clearTimeout(authenticationTimer);
+            cancelAuthentication?.();
+            if (session) {
+                cleanup(session, "peer_close", undefined, code);
+                connectionLogger.debug({ event: "connection_closed", closeCode: code,
+                    pendingRequests: session.pending.size });
+            } else {
+                limiter.log(connectionLogger, "debug", rejected ? "rejected_connection_closed" : "auth_closed",
+                    identity, { closeCode: code });
+            }
         });
-        wsLogger.trace("A client connected");
-        const url = new URL(req.url, "ws://localhost");
-        if (url.pathname == "/socket/v1") {
-            const deviceKey = url.searchParams.get("deviceKey");
-            if (!deviceKey || typeof deviceKey !== "string") {
-                ws.send("ERR: deviceKey was not properly specified.");
+        ws.on("error", (error) => {
+            closed = true;
+            clearTimeout(rejectionTimer);
+            clearTimeout(authenticationTimer);
+            cancelAuthentication?.();
+            const fragment = error.message === "Invalid WebSocket frame: invalid opcode 0";
+            if (session) cleanup(session, fragment ? "fragment_error" : "transport_error",
+                fragment ? "Controller dropped packet." : "Controller disconnected.");
+            else if (!rejected) limiter.log(connectionLogger, "warn", "pre_auth_error", identity);
+            ws.terminate();
+        });
+
+        function reject(code: number, reason: string, extra: Record<string, unknown> = {}): void {
+            if (closed || rejected || ws.readyState !== WebSocket.OPEN) return;
+            rejected = true;
+            limiter.log(connectionLogger, "info", "connection_rejected", `${identity}:${reason}`,
+                { reason, closeCode: code, ...extra });
+            rejectionTimer = setTimeout(() => {
+                limiter.log(connectionLogger, "warn", "rejection_forced_close", `${identity}:${reason}`, { reason });
                 ws.terminate();
-                return;
+            }, rejectionMs);
+            rejectionTimer.unref();
+            try {
+                ws.send(`ERR: ${reason}.`);
+                ws.close(code, reason);
+            } catch {
+                clearTimeout(rejectionTimer);
+                ws.terminate();
             }
-            setupWebsocketConnectionCommon(authPlugin, ws, wsLogger, deviceKey);
-            setupWebsocketConnectionV1(ws, wsLogger, deviceKey);
-        } else {
-            ws.send("ERR: invalid path.");
-            ws.terminate();
-            return;
         }
-    });
-}
 
-async function setupWebsocketConnectionCommon(
-    authPlugin: AuthenticationPlugin,
-    ws: WebSocket,
-    wsLogger: Logger,
-    deviceKey: string
-) {
-    if (connectedControllers.has(deviceKey)) {
-        ws.send("ERR: A controller with this device key is already connected.");
-        ws.terminate();
-        return;
-    }
+        let url: URL;
+        try { url = new URL(req.url || "", "ws://localhost"); }
+        catch { reject(1008, "invalid path"); return; }
+        if (url.pathname !== "/socket/v1") { reject(1008, "invalid path"); return; }
+        const key = url.searchParams.get("deviceKey");
+        if (!key) { reject(1008, "missing device key"); return; }
+        identity = tokenFingerprint(key);
+        connectionLogger = connectionLogger.child({ tokenHash: identity });
 
-    let isValid = false;
-    try {
-        isValid = await authPlugin.validateKey(deviceKey);
-    } catch (err) {
-        wsLogger.error(err, "Error validating device key");
-        ws.send("ERR: Error validating device key.");
-        ws.terminate();
-        return;
-    }
-    if (!isValid) {
-        ws.send("ERR: Invalid device key.");
-        ws.terminate();
-        return;
-    }
-
-    connectedControllers.set(deviceKey, ws);
-    pendingResponses.set(deviceKey, new Map());
-
-    // Close connections that don't respond to pings within 10 seconds.
-    ws["isAlive"] = true;
-    ws.on("pong", () => {
-        ws["isAlive"] = true;
-    });
-
-    function terminate() {
-        connectedControllers.delete(deviceKey);
-        if (pendingResponses.has(deviceKey)) {
-            pendingResponses.get(deviceKey).forEach((v) => {
-                v.res.status(408).send({
-                    message: "Controller disconnected.",
-                }); // Client timeout
+        async function authenticate(): Promise<void> {
+            if (closed || stopping || ws.readyState !== WebSocket.OPEN) return;
+            let valid: boolean;
+            let timedOut = false;
+            const authenticationStarted = Date.now();
+            const cancelled = new Promise<boolean>(resolve => {
+                cancelAuthentication = () => resolve(false);
+                authenticationTimer = setTimeout(() => {
+                    timedOut = true;
+                    resolve(false);
+                }, authenticationMs);
+                authenticationTimer.unref();
             });
-            pendingResponses.delete(deviceKey);
-        }
-        clearInterval(intervalId);
-    }
-
-    const intervalId = setInterval(() => {
-        // Close the connection if a pong was not received since the last check.
-        if (!ws["isAlive"]) {
-            wsLogger.trace(
-                `A client with device key '${deviceKey}' did not respond to pings.`
-            );
-            ws.terminate();
-            terminate();
-            return;
-        }
-
-        ws["isAlive"] = false;
-        ws.ping();
-    }, 10 * 1000);
-
-    ws.on("error", (err) => {
-        if (err.message == "Invalid WebSocket frame: invalid opcode 0") {
-            // Handle dropped start of fragmented packet gracefully
-            wsLogger.warn(
-                `A client with device key '${deviceKey}' dropped the start of a fragmented packet.`
-            );
-            if (pendingResponses.has(deviceKey)) {
-                pendingResponses.get(deviceKey).forEach((v) => {
-                    v.res.status(408).send({
-                        message: "Controller dropped packet.",
-                    }); // Client timeout
-                });
+            try {
+                // Promise.race also observes a late backend rejection, so it
+                // cannot become an unhandled rejection after timeout/close.
+                valid = await Promise.race([
+                    Promise.resolve().then(() => authPlugin.validateKey(key)), cancelled,
+                ]);
             }
-        } else {
-            wsLogger.error(
-                err,
-                `A client with device key '${deviceKey}' errored:`
-            );
-            ws.terminate();
-            terminate();
-        }
-    });
-
-    ws.on("close", (code, reason) => {
-        wsLogger.trace(
-            { code, reason },
-            `A client with device key '${deviceKey}' disconnected.`
-        );
-        terminate();
-    });
-
-    wsLogger.info(`A client connected with device key '${deviceKey}'.`);
-}
-
-async function setupWebsocketConnectionV1(
-    ws: WebSocket,
-    wsLogger: Logger,
-    deviceKey: string
-) {
-    ws.on("message", (data: WebSocket.Data, isBinary: boolean) => {
-        // Ignore binary messages.
-        if (isBinary) {
-            wsLogger.info(
-                `Ignoring binary message from client with device key '${deviceKey}'.`
-            );
-            return;
-        }
-
-        let buffer: Buffer;
-
-        switch (typeof data) {
-            case "string":
-                buffer = Buffer.from(data);
-                break;
-            case "object":
-                if (data instanceof Buffer) {
-                    buffer = data;
-                    break;
-                } else if (data instanceof ArrayBuffer) {
-                    buffer = Buffer.from(data);
-                    break;
-                } else if (data instanceof Array) {
-                    // Array of buffers
-                    buffer = Buffer.concat(data.map((e) => Uint8Array.from(e)));
-                }
-                break;
-            default:
-                wsLogger.info(
-                    `Received message with invalid type: ${typeof data} from client with device key '${deviceKey}'.`
-                );
+            catch (error) {
+                reject(1011, "authentication unavailable", { errorCode: backendErrorCode(error) });
                 return;
+            } finally {
+                clearTimeout(authenticationTimer);
+                cancelAuthentication = undefined;
+            }
+            if (closed || stopping || ws.readyState !== WebSocket.OPEN) return;
+            if (timedOut || Date.now() - authenticationStarted >= authenticationMs) {
+                reject(1011, "authentication timed out", { errorCode: "AUTH_TIMEOUT" });
+                return;
+            }
+            if (!valid) { reject(1008, "invalid device key"); return; }
+            // Final ownership check and claim are synchronous, with no await gap.
+            const owner = sessions.get(key);
+            if (owner) {
+                reject(1008, "device key already connected", {
+                    ownerConnectionId: owner.connectionId, ownerAgeMs: Date.now() - owner.startedAt,
+                    pendingRequests: owner.pending.size,
+                });
+                return;
+            }
+            session = { ws, key, connectionId, logger: connectionLogger,
+                startedAt: connectedAt, lastPongAt: Date.now(), isAlive: true,
+                closed: false, pending: new Map(), ids: new RequestIds() };
+            sessions.set(key, session);
+            const accepted = session;
+            accepted.onPong = () => {
+                if (accepted.closed) return;
+                accepted.isAlive = true;
+                accepted.lastPongAt = Date.now();
+            };
+            ws.on("pong", accepted.onPong);
+            accepted.heartbeat = setInterval(() => {
+                if (accepted.closed) return;
+                if (!accepted.isAlive) {
+                    cleanup(accepted, "heartbeat_expired");
+                    ws.terminate();
+                    return;
+                }
+                accepted.isAlive = false;
+                ws.ping(undefined, undefined, (error) => {
+                    if (error) { cleanup(accepted, "ping_failed"); ws.terminate(); }
+                });
+            }, heartbeatMs);
+            accepted.heartbeat.unref();
+            accepted.onMessage = (data, binary) => {
+                if (accepted.closed || sessions.get(key) !== accepted) return;
+                const buffer = Buffer.isBuffer(data) ? data
+                    : Array.isArray(data) ? Buffer.concat(data) : Buffer.from(data);
+                const newline = buffer.indexOf(0x0a);
+                const header = newline < 0 ? Buffer.alloc(0) : buffer.subarray(0, newline);
+                const match = !binary && isValidUTF8(header)
+                    ? /^RES: ([0-9a-f]{4})\r$/.exec(header.toString()) : null;
+                if (!match) {
+                    limiter.log(connectionLogger, "warn", "invalid_response_frame", identity,
+                        { length: buffer.length, reason: binary ? "binary" : "invalid_header" });
+                    return;
+                }
+                const id = match[1];
+                const entry = accepted.pending.get(id);
+                if (!entry) {
+                    limiter.log(connectionLogger, "debug", "unknown_response_id", identity, { requestId: id });
+                    return;
+                }
+                settle(accepted, id, entry, { reason: "controller_response", body: buffer.subarray(newline + 1) });
+            };
+            ws.on("message", accepted.onMessage);
+            connectionLogger.info({ event: "session_accepted", authentication: "accepted", pendingRequests: 0 });
         }
-
-        const index = buffer.indexOf(0x0a);
-
-        if (index === -1) {
-            wsLogger.error(
-                { message: buffer.toString("hex") },
-                `Received message missing the request key from device key '${deviceKey}'.`
-            );
-            return;
-        }
-
-        const headerBuffer = buffer.subarray(0, index);
-
-        if (!isValidUTF8(headerBuffer)) {
-            wsLogger.error(
-                { message: headerBuffer.toString("hex") },
-                `Received message with invalid UTF-8 encoding for header from client with device key '${deviceKey}'.`
-            );
-            return;
-        }
-
-        const header = headerBuffer.toString();
-
-        const match = header.match(/^RES: ([0-9a-f]{4})\r/);
-        // Ignore messages that aren't formatted like responses to forwarded requests.
-        if (!match) {
-            wsLogger.warn(
-                `Received header with invalid format: ${header} from client with device key '${deviceKey}'.`
-            );
-            return;
-        }
-        const requestKey = match[1];
-        const body = buffer.subarray(index + 1, buffer.length);
-
-        // Ignore invalid request IDs.
-        if (!pendingResponses.has(deviceKey)) {
-            wsLogger.warn(
-                `Received response with invalid device key '${deviceKey}'.`
-            );
-            return;
-        }
-
-        const deviceResponses = pendingResponses.get(deviceKey);
-
-        if (!deviceResponses.has(requestKey)) {
-            wsLogger.warn(
-                `Received response with invalid key: ${requestKey} from client with device key '${deviceKey}'.`
-            );
-            return;
-        }
-
-        const { res, logger } = deviceResponses.get(requestKey);
-        logger.trace(
-            `Received response for '${requestKey}' from device with key '${deviceKey}'`
-        );
-        deviceResponses.delete(requestKey);
-
-        res.socket.write(Uint8Array.from(body));
-        res.socket.end();
+        void authenticate();
     });
+
+    const forwardRequestV1: RequestHandler = (req, res) => {
+        const key = req.params.deviceKey;
+        if (!key || typeof key !== "string") {
+            res.status(401).json({ message: "No device key was specified or an invalid format was used." });
+            return;
+        }
+        const session = sessions.get(key);
+        if (session && session.ws.readyState !== WebSocket.OPEN) cleanup(session, "transport_unavailable");
+        if (!session || session.closed) {
+            res.status(404).json({ message: "Specified device does not exist or is not connected." });
+            return;
+        }
+        const id = session.ids.allocate(session.pending);
+        if (id === undefined) {
+            res.status(429).json({ message: "Controller request capacity reached." });
+            return;
+        }
+        const path = /^\/forward\/v1\/[^/?]+(.*)$/.exec(req.url)?.[1] || "/";
+        let rawRequest = `${req.method} ${path} HTTP/${req.httpVersion}\r\n`;
+        for (const [name, value] of Object.entries(req.headers)) rawRequest += `${name}: ${value}\r\n`;
+        rawRequest += `\r\n${typeof req.body === "string" ? req.body : ""}`;
+        const entry: PendingResponse = { res, startedAt: Date.now(), settled: false,
+            endpoint: forwardedEndpoint(req.url), timer: undefined, detach: () => {} };
+        const abandoned = () => settle(session, id, entry, { reason: "browser_departed" });
+        const finished = () => settle(session, id, entry, { reason: "http_finished" });
+        entry.detach = () => {
+            res.off("close", abandoned);
+            res.off("error", abandoned);
+            res.off("finish", finished);
+        };
+        res.once("close", abandoned);
+        res.once("error", abandoned);
+        res.once("finish", finished);
+        entry.timer = setTimeout(() => settle(session, id, entry,
+            { reason: "request_timeout", message: "Controller did not respond." }), timeoutMs);
+        entry.timer.unref();
+        session.pending.set(id, entry);
+        if (res.destroyed || !res.socket || res.socket.destroyed) { abandoned(); return; }
+        try {
+            session.ws.send(`FWD: ${id}\r\n${rawRequest}`, (error) => {
+                if (error) settle(session, id, entry, { reason: "send_failed", message: "Controller disconnected." });
+            });
+        } catch {
+            settle(session, id, entry, { reason: "send_failed", message: "Controller disconnected." });
+        }
+    };
+
+    await once(server, "listening");
+    return { server, forwardRequestV1, async close(): Promise<void> {
+        stopping = true;
+        for (const session of sessions.values()) cleanup(session, "server_shutdown");
+        for (const client of server.clients) client.terminate();
+        await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+    } };
 }
-
-export const forwardRequestV1 = (req: Request, res: Response) => {
-    const deviceKey = req.params.deviceKey;
-    if (!deviceKey || typeof deviceKey !== "string") {
-        res.status(401).json({
-            message:
-                "No device key was specified or an invalid format was used.",
-        });
-        return;
-    }
-
-    if (!connectedControllers.has(deviceKey)) {
-        res.status(404).json({
-            message: "Specified device does not exist or is not connected.",
-        });
-        return;
-    }
-
-    const ws: WebSocket = connectedControllers.get(deviceKey);
-
-    const path = req.url.substring(("/forward/v1/" + deviceKey).length) || "/";
-
-    let rawRequest: string = `${req.method} ${path} HTTP/${req.httpVersion}\r\n`;
-    for (const header in req.headers) {
-        rawRequest += `${header}: ${req.headers[header]}\r\n`;
-    }
-
-    // req.body be an empty object if no body exists.
-    rawRequest += `\r\n${Object.keys(req.body).length === 0 ? "" : req.body}`;
-
-    // A random 4 digit hexadecimal number.
-    const requestId = Math.floor(Math.random() * 0x10000)
-        .toString(16)
-        .padStart(4, "0");
-
-    const responseLogger = req.log.child({ requestId });
-
-    responseLogger.trace(
-        `Forwarding request to device with key '${deviceKey}'`
-    );
-
-    // Ignore invalid request IDs.
-    if (!pendingResponses.has(deviceKey)) {
-        res.status(404).json({
-            message: "Specified device does not exist or is not connected.",
-        });
-        return;
-    }
-
-    const deviceResponses = pendingResponses.get(deviceKey);
-
-    deviceResponses.set(requestId, {
-        res,
-        logger: responseLogger,
-    });
-
-    req.on("close", () => {
-        if (pendingResponses.has(deviceKey)) {
-            const deviceResponses = pendingResponses.get(deviceKey);
-            deviceResponses.delete(requestId);
-        }
-    });
-
-    ws.send(`FWD: ${requestId}\r\n${rawRequest}`);
-};

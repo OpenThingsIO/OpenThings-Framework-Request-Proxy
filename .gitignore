@@ -4,3 +4,4 @@ js
 *.iml
 private
 dist
+/planning/

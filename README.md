@@ -29,6 +29,68 @@ Additionally, there are some environment variables that can optionally be specif
 | `HOST` | The address that the HTTP and websocket servers should bind to. | `127.0.0.1` |
 | `HTTP_PORT` | The port that the HTTP server should listen on. | `3000` |
 | `WEBSOCKET_PORT` | The port that the websocket server should listen on. | `8080` |
+| `REQUEST_TIMEOUT_MS` | Maximum wait for a complete controller response, in milliseconds. Must be an integer from 1 to 300000; invalid values fall back to the default with a warning. | `60000` |
+
+## Connection and request behavior
+
+Controllers are authenticated before registration and protocol handling. A new
+connection using an already connected device key is rejected; it does not replace
+the existing owner. Authentication has a ten-second deadline; timeout rejects with
+close code `1011`, and late results cannot register the connection. Disconnecting
+during authentication releases its deadline and wait state. MySQL queries also
+have a ten-second driver inactivity limit; a lookup that completes after the
+socket's deadline is ignored. The existing 10-second ping interval and missed-pong policy
+are preserved. Policy rejections use WebSocket close code `1008`; authentication
+backend failures use `1011`. Rejected connections receive an `ERR:` message and a
+close frame, with forced termination after five seconds if closing stalls.
+
+Pending requests belong to their individual controller session. A disconnected
+controller fails its pending requests with HTTP `408`, and requests for an absent
+controller receive `404`. Requests exceeding `REQUEST_TIMEOUT_MS` receive `408`
+with `{"message":"Controller did not respond."}`. Browser departure releases
+the pending request without waiting for the controller. A timeout or browser
+departure does not cancel an action already sent to the controller.
+
+The proxy never automatically resends a forwarded request, including GETs:
+OpenSprinkler uses GET for some state-changing commands. A timed-out command may
+already have executed, so its outcome can be unknown.
+
+Request IDs remain four hexadecimal characters and are allocated sequentially
+within each session, starting at a random value and skipping pending IDs. Full
+capacity returns HTTP `429`. The unchanged wire format has no generation field:
+a sufficiently delayed response can match a newer request after same-session ID
+reuse. Skipping occupied IDs means a counter cycle need not represent 65,536
+forwarded requests. Responses on an old connection cannot answer requests on a
+replacement connection.
+
+Lifecycle logs include connection IDs, token fingerprints, cleanup/rejection
+reasons, heartbeat age, and pending counts. HTTP and request-settlement logs retain
+recognized endpoint names such as `/jc`, `/cm` and `/s2id_gen`. Unknown endpoints
+are logged as `/other`; subsequent path segments are dropped. HTTP logging omits
+URLs, query strings, headers, and response headers to avoid leaking tokens and
+passwords. Startup diagnostics identify missing or invalid setting names without
+printing their values. Malformed
+payloads and raw database errors are not logged. Rejection and other repeated
+diagnostic events have bounded output and aggregation state.
+
+Both Docker stages use Node `22.18.0` on Alpine, pinned to the immutable image
+index digest in `Dockerfile`. Dependency installation uses `npm ci`. Updating the
+base image requires an intentional digest change and runtime validation; it no
+longer follows the floating Node LTS tag.
+
+## Local validation
+
+```bash
+npm ci
+npm run typecheck
+npm test
+```
+
+Tests start isolated HTTP/WebSocket servers on loopback with fake device keys and
+stubbed authentication. They include a real 31-second response to verify that the
+60-second default accommodates a request taking longer than 30 seconds. The suite
+does not contact production or physical controllers. Real legacy-client pacing
+and device compatibility still require separately authorized staging tests.
 
 
 
