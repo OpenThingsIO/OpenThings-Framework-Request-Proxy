@@ -246,7 +246,7 @@ export async function setupWebsockets(
         let closed = false;
         let closeObserved = false;
         let rejected = false;
-        let rejectionTimer: ReturnType<typeof setTimeout> | undefined;
+        let closeTimer: ReturnType<typeof setTimeout> | undefined;
         const authenticationAbort = new AbortController();
         let identity = "unspecified";
 
@@ -259,7 +259,7 @@ export async function setupWebsockets(
             if (!session) telemetry.adjust("unaccepted", -1);
             if (rejected) telemetry.adjust("closing", -1);
             closed = true;
-            clearTimeout(rejectionTimer);
+            clearTimeout(closeTimer);
             authenticationAbort.abort();
             if (session) {
                 cleanup(session, "peer_close", undefined, code);
@@ -277,13 +277,19 @@ export async function setupWebsockets(
                 telemetry.count("oversized_message");
             }
             closed = true;
-            clearTimeout(rejectionTimer);
+            clearTimeout(closeTimer);
             authenticationAbort.abort();
             const fragment = error.message === "Invalid WebSocket frame: invalid opcode 0";
             if (session) cleanup(session, fragment ? "fragment_error" : "transport_error",
                 fragment ? "Controller dropped packet." : "Controller disconnected.");
             else if (!rejected) limiter.log(connectionLogger, "warn", "pre_auth_error", identity);
-            ws.terminate();
+            if (ws.readyState === WebSocket.CLOSING) {
+                // The receiver has queued a protocol close. Give it time to reach the peer.
+                closeTimer = setTimeout(() => ws.terminate(), rejectionMs);
+                closeTimer.unref();
+            } else {
+                ws.terminate();
+            }
         });
 
         function reject(code: number, reason: RejectionReason, extra: Record<string, unknown> = {}): void {
@@ -295,17 +301,17 @@ export async function setupWebsockets(
             else if (code === 1008) telemetry.count("policy_rejected");
             limiter.log(connectionLogger, "info", "connection_rejected", `${identity}:${reason}`,
                 { reason, closeCode: code, ...extra });
-            rejectionTimer = setTimeout(() => {
+            closeTimer = setTimeout(() => {
                 telemetry.count("rejection_forced_close");
                 limiter.log(connectionLogger, "warn", "rejection_forced_close", `${identity}:${reason}`, { reason });
                 ws.terminate();
             }, rejectionMs);
-            rejectionTimer.unref();
+            closeTimer.unref();
             try {
                 ws.send(`ERR: ${reason}.`);
                 ws.close(code, reason);
             } catch {
-                clearTimeout(rejectionTimer);
+                clearTimeout(closeTimer);
                 ws.terminate();
             }
         }
