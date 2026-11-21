@@ -3,6 +3,7 @@ const { once } = require('node:events');
 const http = require('node:http');
 const WebSocket = require('ws');
 const pino = require('pino');
+const { randomUUID } = require('node:crypto');
 const { setupWebsockets, createHttpApp } = require(process.env.OTF_TEST_BUNDLE);
 
 const token = 'local-only-fake-token';
@@ -31,6 +32,12 @@ async function fixture(t, options = {}) {
     const server = createHttpApp(forward, logs.logger).listen(0, '127.0.0.1');
     await once(server, 'listening');
     const clients = new Set();
+    const connecting = new Map();
+    proxy.server.on('connection', (socket, req) => {
+        const tag = req.headers['x-otf-test-connection'];
+        const resolve = connecting.get(tag);
+        if (resolve) { connecting.delete(tag); resolve(socket); }
+    });
     t.after(async () => {
         for (const client of clients) client.terminate();
         server.closeAllConnections();
@@ -40,13 +47,15 @@ async function fixture(t, options = {}) {
     });
     async function connect({ key = token, path = '/socket/v1', query, ...wsOptions } = {}) {
         const acceptedBefore = logs.records().filter(r => r.event === 'session_accepted').length;
-        const serverConnection = once(proxy.server, 'connection');
-        const ws = new WebSocket(`ws://127.0.0.1:${proxy.server.address().port}${path}${query ?? `?deviceKey=${key}`}`, wsOptions);
+        const tag = randomUUID();
+        const serverConnection = new Promise(resolve => connecting.set(tag, resolve));
+        const ws = new WebSocket(`ws://127.0.0.1:${proxy.server.address().port}${path}${query ?? `?deviceKey=${key}`}`,
+            { ...wsOptions, headers: { ...wsOptions.headers, 'x-otf-test-connection': tag } });
         clients.add(ws);
         ws.on('error', () => {});
         const closed = new Promise(resolve => ws.once('close', (code, reason) => resolve({ code, reason: reason.toString() })));
         await once(ws, 'open');
-        const [socket] = await serverConnection;
+        const socket = await serverConnection;
         return { ws, socket, closed, accepted: () => until(() =>
             logs.records().filter(r => r.event === 'session_accepted').length > acceptedBefore) };
     }

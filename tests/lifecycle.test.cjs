@@ -11,18 +11,19 @@ test('simultaneous delayed authentication accepts only one owner and gates proto
     const second = await f.connect();
     assert.equal(first.socket.listenerCount('message'), 0);
     assert.equal(second.socket.listenerCount('message'), 0);
-    validations[1](true);
-    await second.accepted();
-    const incoming = receive(second.ws);
+    assert.deepEqual(await second.closed, { code: 1011, reason: 'authentication busy' });
+    assert.equal(validations.length, 1);
+    validations[0](true);
+    await first.accepted();
+    const incoming = receive(first.ws);
     const pending = f.request();
     const requestId = id(await incoming);
     // The authenticated-but-not-yet-accepted connection cannot answer for its owner.
-    reply(first.ws, requestId, 'FORGED');
+    // The rejected contender cannot install a response handler.
+    assert.equal(second.socket.listenerCount('message'), 0);
     await delay(10);
     assert.equal(f.logs.records().filter(r => r.event === 'request_settled').length, 0);
-    validations[0](true);
-    assert.equal((await first.closed).code, 1008);
-    reply(second.ws, requestId, 'OWNER');
+    reply(first.ws, requestId, 'OWNER');
     assert.equal((await pending.response).body.toString(), 'OWNER');
     assert.equal(f.logs.records().filter(r => r.event === 'session_accepted').length, 1);
 });
@@ -85,7 +86,7 @@ test('invalid authenticated duplicate cannot displace the owner', async t => {
     await owner.accepted();
     valid = false;
     const duplicate = await f.connect();
-    assert.equal((await duplicate.closed).reason, 'invalid device key');
+    assert.equal((await duplicate.closed).reason, 'device key already connected');
     assert.equal(owner.ws.readyState, WebSocket.OPEN);
 });
 
@@ -101,6 +102,7 @@ test('old close, error and heartbeat callbacks cannot affect replacement request
     await old.accepted();
     const lateClose = old.socket.listeners('close')[0];
     const lateError = old.socket.listeners('error')[0];
+    const oldCallbacks = callbacks.slice();
     const oldIncoming = receive(old.ws);
     const oldRequest = f.request();
     await oldIncoming;
@@ -114,7 +116,7 @@ test('old close, error and heartbeat callbacks cannot affect replacement request
     const requestId = id(await incoming);
     lateClose(1006);
     lateError(new Error('old transport error'));
-    callbacks[0]();
+    for (const callback of oldCallbacks) callback();
     lateClose(1006);
     reply(replacement.ws, requestId, 'NEW');
     assert.equal((await pending.response).body.toString(), 'NEW');
@@ -192,10 +194,14 @@ for (const outcome of ['success', 'error']) {
         assert.deepEqual(await old.closed, { code: 1011, reason: 'authentication timed out' });
         assert.equal(old.socket.listenerCount('message'), 0);
         assert.equal((await f.request().response).status, 404);
-        const replacement = await f.connect();
-        await replacement.accepted();
+        const contender = await f.connect();
+        assert.deepEqual(await contender.closed, { code: 1011, reason: 'authentication busy' });
+        assert.equal(calls, 1);
         if (outcome === 'success') complete(true);
         else fail(new Error('late backend secret'));
+        await until(() => f.stats().gauges.authActive === 0);
+        const replacement = await f.connect();
+        await replacement.accepted();
         const incoming = receive(replacement.ws);
         const pending = f.request();
         reply(replacement.ws, id(await incoming));
@@ -205,7 +211,7 @@ for (const outcome of ['success', 'error']) {
     });
 }
 
-test('an authenticating duplicate timing out preserves its healthy owner and pending requests', async t => {
+test('a duplicate skips authentication and preserves its healthy owner and pending requests', async t => {
     let calls = 0;
     const f = await fixture(t, { authenticationTimeoutMs: 30, auth: {
         init: async () => {}, validateKey: () => ++calls === 1 ? Promise.resolve(true) : new Promise(() => {}),
@@ -216,7 +222,8 @@ test('an authenticating duplicate timing out preserves its healthy owner and pen
     const pending = f.request();
     const requestId = id(await incoming);
     const duplicate = await f.connect();
-    assert.equal((await duplicate.closed).code, 1011);
+    assert.deepEqual(await duplicate.closed, { code: 1008, reason: 'device key already connected' });
+    assert.equal(calls, 1);
     reply(owner.ws, requestId);
     assert.equal((await pending.response).status, 200);
     assert.equal(owner.ws.readyState, WebSocket.OPEN);
@@ -236,7 +243,7 @@ test('authentication deadline timers are cancelled on acceptance and peer depart
     const owner = await f.connect();
     await owner.accepted();
     hung = true;
-    const abandoned = await f.connect();
+    const abandoned = await f.connect({ key: 'another-fake-key' });
     abandoned.ws.close();
     await abandoned.closed;
     await delay(50);

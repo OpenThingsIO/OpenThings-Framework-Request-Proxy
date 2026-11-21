@@ -30,6 +30,10 @@ Additionally, there are some environment variables that can optionally be specif
 | `HTTP_PORT` | The port that the HTTP server should listen on. | `3000` |
 | `WEBSOCKET_PORT` | The port that the websocket server should listen on. | `8080` |
 | `REQUEST_TIMEOUT_MS` | Maximum wait for a complete controller response, in milliseconds. Must be an integer from 1 to 300000; invalid values fall back to the default with a warning. | `60000` |
+| `WEBSOCKET_MAX_PAYLOAD_BYTES` | Maximum incoming WebSocket message size, including all fragments and the response envelope, before or after authentication. Integer from 1 to 16777216; invalid values prevent startup. | `4194304` (4 MiB) |
+| `STATS_INTERVAL_MS` | Interval for aggregate `proxy_stats` log records. Integer from 1 to 300000; invalid values prevent startup. | `10000` |
+| `AUTH_CONCURRENCY` | Maximum running authentication operations. Integer from 1 to 100; invalid values prevent startup. | `10` |
+| `AUTH_QUEUE_LIMIT` | Maximum authentication jobs waiting to start. Integer from 1 to 10000; invalid values prevent startup. | `500` |
 
 ## Connection and request behavior
 
@@ -37,12 +41,28 @@ Controllers are authenticated before registration and protocol handling. A new
 connection using an already connected device key is rejected; it does not replace
 the existing owner. Authentication has a ten-second deadline; timeout rejects with
 close code `1011`, and late results cannot register the connection. Disconnecting
-during authentication releases its deadline and wait state. MySQL queries also
-have a ten-second driver inactivity limit; a lookup that completes after the
+during authentication releases its deadline and wait state. MySQL queries have a
+driver inactivity limit capped at ten seconds and the remaining authentication
+time after connection acquisition; a lookup that completes after the
 socket's deadline is ignored. The existing 10-second ping interval and missed-pong policy
 are preserved. Policy rejections use WebSocket close code `1008`; authentication
 backend failures use `1011`. Rejected connections receive an `ERR:` message and a
 close frame, with forced termination after five seconds if closing stalls.
+Oversized incoming messages close with code `1009`. This bounds each message;
+it is not a limit on total memory or connection count.
+
+Authentication uses a bounded FIFO queue and at most one waiting/running lookup
+per key. An existing open owner's duplicate is rejected before any lookup; the
+owner is still rechecked after validation. Expired or disconnected waiters do not
+enter the backend. A running lookup retains its concurrency slot and same-key
+reservation until the backend actually finishes, even if its caller is gone.
+Queue-full or same-key contention receives close code `1011` with reason
+`authentication busy`. Capacity failures never use HTTP `401`/`403`. This does not
+require firmware backoff support and does not change heartbeat or ownership policy.
+The defaults are starting limits to validate against the deployment's database
+latency and memory budget. This queue bounds authentication work, not all sockets:
+there is no pre-upgrade connection cap, and rejected sockets may linger during the
+five-second close fallback. Reverse-proxy/OS connection limits remain necessary.
 
 Pending requests belong to their individual controller session. A disconnected
 controller fails its pending requests with HTTP `408`, and requests for an absent
@@ -72,6 +92,16 @@ passwords. Startup diagnostics identify missing or invalid setting names without
 printing their values. Malformed
 payloads and raw database errors are not logged. Rejection and other repeated
 diagnostic events have bounded output and aggregation state.
+
+Aggregate `proxy_stats` records include cumulative counters (including suppressed
+rejections), counter deltas since the previous record, current/high-water gauges,
+fixed cumulative latency buckets, process memory/CPU and event-loop measurements.
+Running authentication remains counted until the backend actually finishes, even
+after the socket closes. Memory `arrayBuffers` overlaps `external`; do not add them
+together. Admission, request and protocol warnings have separate bounded log
+budgets. Aggregate metrics contain no per-token labels and have no public HTTP
+endpoint. These records describe this Node process; correlate them with separate
+reverse-proxy/container/host measurements to investigate incidents.
 
 Both Docker stages use Node `22.18.0` on Alpine, pinned to the immutable image
 index digest in `Dockerfile`. Dependency installation uses `npm ci`. Updating the
@@ -108,6 +138,21 @@ The plugin can be configured through the following environment variables:
 | `AUTHENTICATION_PLUGIN` | Must be set to `MySQLAuthenticationPlugin` to use this plugin. | `MySQLAuthenticationPlugin` |
 | `MYSQL_CONNECTION_URL` | The URL of the MySQL server to connect to. | `mysql://username:password@localhost:3306/otf` |
 | `MYSQL_TABLE` | The table in the database that stores valid device keys. | `registered_devices` |
+
+The plugin uses an existence lookup with `LIMIT 1`; index `device_key` for the
+deployment's lookup workload. The pool's connection limit follows
+`AUTH_CONCURRENCY`, waiting inside the driver is disabled, and driver debug output
+is disabled to prevent SQL/key leakage. These limits override URL pool/debug
+options. Disconnected/expired callers are checked again after acquisition, before
+SQL begins. An in-progress query is not cancelled by destroying its connection;
+the driver may itself discard a connection on a fatal inactivity timeout.
+
+CI also runs real-driver integration tests against a disposable MariaDB. For
+local integration tests, explicitly set `OTF_TEST_MYSQL_ISOLATED=1` and
+`OTF_TEST_MYSQL_URL` to a disposable database named `otf_test`, then run `npm test`.
+The tests create/drop their own tables and acquire table locks. Never point this
+test URL at a shared or production database. Without these explicit test settings,
+the integration cases are skipped and the normal suite uses fake backends.
 
 
 #### EnvironmentVariableAuthenticationPlugin
