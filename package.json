@@ -22,7 +22,7 @@
 		"mysql": "^2.18.1",
 		"pino": "^9.2.0",
 		"pino-http": "^10.1.0",
-		"ws": "^8.17.1"
+		"ws": "^8.21.0"
 	},
 	"devDependencies": {
         "esbuild": "^0.21.5",
